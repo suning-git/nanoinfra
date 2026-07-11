@@ -1,0 +1,29 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Training artifacts ---
+*.pt
+*.bin
+
+# --- 3-root data layout: keep the dirs, ignore their contents ---
+datasets/*
+!datasets/.gitkeep
+models/*
+!models/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# --- OS ---
+.DS_Store

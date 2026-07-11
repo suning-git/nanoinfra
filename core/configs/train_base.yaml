@@ -1,0 +1,108 @@
+# train_base.yaml - base template for all training configs
+#
+# The base template every training config builds on, providing sensible defaults.
+# Recipe configs (e.g. train_d12.yaml) inherit this via _base_ and override only what they change.
+#
+# Design:
+# - Core training params live at the top level (max_steps, max_grad_norm, ...)
+# - Each component's config lives in a first-level submodule (model, data, optimizer, checkpoint, ...)
+# - Trainer is the coordinator: it wires model + data + optimizer + checkpoint + logging
+
+# ============================================================================
+# Core training params
+# ============================================================================
+max_steps: -1                # total training steps (-1 = auto-compute from the Chinchilla scaling rule)
+target_param_data_ratio: 20  # used when auto-computing max_steps (Chinchilla optimal = 20)
+num_iterations: -1           # early-stop iteration count (-1 = no early stop; only stops, not used elsewhere)
+seed: 42                     # RNG seed (init + training; the orchestrator passes it to setup_model_for_training)
+
+# ============================================================================
+# Hardware and batch config
+# ============================================================================
+sequence_len: 2048           # sequence length
+device_batch_size: 16        # per-device batch size
+total_batch_size: 524288     # total batch size (tokens), used to compute gradient accumulation
+
+# ============================================================================
+# Model config — trunk geometry only. vocab_size / n_token_types are NOT config:
+# they are assembly facts, taken at runtime from the VocabLayout (config must not disagree with the artifact).
+# ============================================================================
+model:
+  depth: 12                  # model depth (required; used to derive n_layer, n_head, n_embd)
+
+# (no data config — data sources are declared modality-side and follow the orchestrator's config,
+#   e.g. data.sources in modalities/text/configs/train_text.yaml)
+
+# ============================================================================
+# Optimizer config
+# ============================================================================
+optimizer:
+  type: adamw                # optimizer type (only adamw is supported currently)
+
+  # Core params (must be set in the Recipe):
+  # - lr_max: peak learning rate (for matrix params)
+
+  # Default params (overridable in the Recipe):
+  max_grad_norm: 1.0         # gradient-clipping threshold
+  weight_decay: 0.01         # AdamW weight decay
+  betas: [0.9, 0.95]         # Adam betas
+  eps: 1.0e-10               # Adam epsilon
+  fused: true                # use the fused optimizer
+
+  # Multi-LR strategy:
+  unembedding_lr: 0.004      # unembedding-layer learning rate
+  embedding_lr: 0.2          # embedding-layer learning rate
+
+  # LR Scheduler config
+  scheduler:
+    type: linear             # scheduler type: linear | cosine
+    warmup_steps: 0          # warmup in ABSOLUTE steps (core speaks absolute steps: warmup is optimizer
+                             #   physics and does not scale with the budget; a recipe that wants a ratio has the orchestrator convert it)
+    warmdown_ratio: 0.2      # warmdown as a fraction of total steps (linear only; warmdown is anchored to the
+                             #   end of the horizon, so a fraction is its natural parameter)
+    final_lr_frac: 0.0       # final LR as a fraction of lr_max
+
+# ============================================================================
+# Checkpoint config
+# ============================================================================
+checkpoint:
+  enabled: true              # enable checkpoint saving
+  save_every: 5000           # save frequency (steps; -1 = save only at the end of training)
+  save_dir: "${oc.env:NANOINFRA_BASE_DIR,./outputs}/checkpoints/d${model.depth}_${wandb.name}"  # dynamic path (references model.depth and wandb.name)
+  keep_last_n: 2             # keep the most recent N checkpoints (-1 = keep all)
+  resume_from: null          # resume path (null = train from scratch | auto = auto-find | explicit path = resume from it)
+  init_model_from: null      # model-weight init path (loads model only; optimizer/dataloader start fresh)
+
+# ============================================================================
+# Logging config
+# ============================================================================
+logging:
+  log_every: 1              # console log frequency (steps)
+  wandb_log_every: 100       # Wandb log frequency (steps)
+
+# ============================================================================
+# Evaluation config — eval cadence is set by each evaluator's own interval_steps
+# (e.g. evaluation.text.interval_steps); a full eval always fires on the last step.
+# ============================================================================
+evaluation: {}
+
+# ============================================================================
+# Profiling config (disabled by default; for performance debugging)
+# ============================================================================
+profiling:
+  enabled: false             # enable profiling
+  start_step: 5              # step at which to start profiling
+  end_step: 10               # step at which to stop profiling
+  save_dir: "./traces"       # trace-file output path
+  profile_rank_0_only: true  # profile rank 0 only
+  record_shapes: true        # record tensor shapes
+  with_stack: true           # record the Python call stack
+  profile_memory: false      # profile memory usage
+
+# ============================================================================
+# Wandb config
+# ============================================================================
+wandb:
+  enabled: true              # enable wandb
+  project: nanoinfra        # Wandb project name
+  name: base_run             # Wandb run name

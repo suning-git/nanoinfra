@@ -1,0 +1,89 @@
+# train_text.yaml — config for the blessed text-pretrain orchestrator
+# (modalities/text/train_text.py).
+#
+# Composition: mechanism defaults come from core/configs/train_base.yaml
+# (optimizer/scheduler/checkpoint/logging/eval cadence — the knobs of core
+# machinery); everything MODALITY-side (the data sources, model scale) lives
+# HERE with the orchestrator that assembles it. hydra.searchpath makes
+# core.configs addressable; this file is a leaf (entry-point only).
+
+defaults:
+  - train_base
+  - _self_
+
+hydra:
+  searchpath:
+    - pkg://core.configs
+
+# ----------------------------------------------------------------------------
+# Hardware / batch
+# ----------------------------------------------------------------------------
+sequence_len: 512               # MFU rises with seq (audit: d12 512->2048 = +8.6 pts)
+device_batch_size: 16
+total_batch_size: 131072
+
+# ----------------------------------------------------------------------------
+# Model — ONLY the trunk geometry. vocab_size and n_token_types are NOT config:
+# they come from the assembled VocabLayout at runtime (the config cannot
+# disagree with the trained artifact).
+#
+# MFU expectations on this box (RTX 5090, from the 2026-07 audit; compiled,
+# single GPU, naive->liger head): d6 25->52% | d12 55->66% | d20 75->81%.
+# Shallow models CANNOT reach high MFU (384-wide GEMMs cap at ~70% of peak;
+# the un-embedding outweighs the trunk) — depth is the main MFU lever.
+# ----------------------------------------------------------------------------
+model:
+  depth: 6                      # smoke-scale default; raise for real runs
+  # Geometry DERIVATION RULES — written here (not hidden in orchestrator code)
+  # so the config dump shows real values and the CLI composes naturally:
+  # `model.depth=20` re-derives dim/heads; `model.dim=1024` replaces the rule.
+  dim: ${eval:'${model.depth} * 64'}                      # house family: dim = 64·depth
+  n_head: ${eval:'max(1, (${model.dim} + 127) // 128)'}   # 128-wide heads
+  n_kv_head: ${model.n_head}                              # no GQA by default
+  trunk_class: null             # default: the reference GPT. Set an import path
+                                #   (pkg.mod.ClassName) to build a custom trunk that
+                                #   satisfies the trunk contract — e.g. an architecture ablation.
+
+max_steps: -1                   # auto (Chinchilla, target_param_data_ratio) unless overridden
+use_compile: true               # audit: +19-34% tok/s; keep on
+
+# ----------------------------------------------------------------------------
+# Data — the text modality's source declaration (FineWeb streaming through
+# TextDataSource; on-the-fly BPE is fully hidden behind compute — audit M2).
+# ----------------------------------------------------------------------------
+data:
+  sequence_len: ${sequence_len}
+  sources:
+    - type: text
+      weight: auto              # auto weight from the token budget below
+      tokens: 268435456         # ~268M-token budget (one FineWeb shard worth)
+      split: train
+      buffer_batch_size: 32
+      tokenizer_threads: 4      # audit: 4 vs 16 makes no difference
+      tokenizer_batch_size: 128
+
+optimizer:
+  # 2026-07 LR audit: the Muon-era matrix lr
+  # 3e-4 (the inherited conservative default). The short-horizon audit said 6e-4 improves val CE by 0.049 and pushed this to 6e-4 — but
+  # the PRODUCTION-horizon re-bracket (exemplars/text_pretrain, full 2.705B
+  # tokens) INVERTED that: 3e-4 3.8101 < 6e-4 3.8150 < 2.4e-3 3.8643 <
+  # 1.2e-3 3.9307. Short probes overestimate the optimum; 3e-4 was right all
+  # along. Reverted 2026-07-07 (Ning's call). embedding_lr/unembedding_lr
+  # (train_base defaults 0.2/0.004) each PASSED their audit — keep.
+  lr_max: 3.0e-4
+
+evaluation:
+  text:
+    enabled: true
+    interval_steps: 250         # eval cadence; a full eval also fires at the final step
+    eval_at: null               # optional EXPLICIT schedule (list of steps; overrides
+                                #   interval_steps) — e.g. log-spaced for scaling curves
+    eval_tokens: 1048576        # ~1M val tokens per eval
+
+checkpoint:
+  enabled: false                # flip on (train_base has save_every/save_dir) for real runs
+
+wandb:
+  enabled: false                # opt in explicitly
+  project: nanoinfra
+  name: "train_text_d${model.depth}"
