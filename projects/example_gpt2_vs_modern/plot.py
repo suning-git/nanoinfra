@@ -14,8 +14,9 @@ def main():
     import matplotlib.pyplot as plt
 
     style = {
-        "modern": ("#1f77b4", "modern GPT  (RoPE · RMSNorm · ReLU²)"),
-        "gpt2":   ("#d62728", "GPT-2 style  (learned-pos · LayerNorm · GELU)"),
+        "modern":    ("#1f77b4", "modern GPT  (RoPE · RMSNorm · ReLU²)"),
+        "gpt2":      ("#d62728", "GPT-2 style  (learned-pos · LayerNorm · GELU)"),
+        "gpt2_rope": ("#9467bd", "GPT-2 + RoPE  (learned-pos → RoPE, else GPT-2)"),
     }
     fig, ax = plt.subplots(figsize=(8.4, 5.6))
     for arm in data["arms"]:

@@ -44,6 +44,7 @@ different architecture, not a tweak of GPT.
 | file | what |
 |------|------|
 | `gpt2.py` | `GPT2Trunk` — the classic architecture as a trunk |
+| `gpt2_rope.py` | `GPT2RoPETrunk` — `gpt2.py` with learned-pos → RoPE, the single-change ablation rung |
 | `spec.py`  | the recipe (depth, budget, the two arms) — the one knob |
 | `run.py`   | trains both arms through the orchestrator, collects the val curves |
 | `plot.py`  | the two curves → `gpt2_vs_modern.png` |
@@ -52,10 +53,10 @@ different architecture, not a tweak of GPT.
 
 ```bash
 # once: fetch a FineWeb shard (shared with the text exemplar)
-python exemplars/text_pretrain/data/download_shards.py
+python download_data.py
 
-python projects/example_gpt2_vs_modern/run.py     # trains modern + gpt2 (d6, minutes)
-python projects/example_gpt2_vs_modern/plot.py    # -> gpt2_vs_modern.png
+python run.py     # trains modern + gpt2 (d6, minutes)
+python plot.py    # -> gpt2_vs_modern.png
 ```
 
 ## Result
@@ -66,13 +67,24 @@ python projects/example_gpt2_vs_modern/plot.py    # -> gpt2_vs_modern.png
 | arm | val CE @ end (step 1219) |
 |-----|-------------------------:|
 | modern GPT | **5.43** |
+| GPT-2 + RoPE | 5.55 |
 | GPT-2 style | 5.84 |
 
 The modern architecture ends **~0.41 CE lower** — a real win, but an **incremental**
-one. (Contrast the [residual ablation](../example_residual_ablation/): removing the
+one. (Contrast the [residual ablation](https://github.com/suning-git/understand_transformer_by_ablation/tree/main/suning/example_residual_ablation): removing the
 residual connection costs +2.4 CE — *load-bearing*; the accumulation of RoPE /
 RMSNorm / ReLU² / no-bias is worth ~0.4 here.) The field moved for good reasons,
 but no single 2019→2025 change is make-or-break the way the residual is.
+
+**The middle arm is the ablation — it attributes that 0.41.** GPT-2 + RoPE
+(`gpt2_rope.py`) is the classic trunk with the learned absolute-position embedding
+swapped for RoPE and **nothing else changed**. That single swap buys **0.28 of the
+0.41** (5.84 → 5.55); everything else the modern trunk piles on — RMSNorm, ReLU²,
+no-bias, QK-norm — buys the remaining **0.12** (5.55 → 5.43). At this scale **RoPE
+is ~70% of the whole 2019→2025 architecture gain**: not make-or-break like the
+residual, but by far the most load-bearing of the incremental changes. On the plot
+the purple curve hugs GPT-2 early, breaks away mid-run, and settles between the two
+— closer to modern's floor.
 
 **And note the crossover.** For the first ~100 steps GPT-2 is actually *ahead* — it
 descends a touch faster early. The modern trunk overtakes around step ~110 and pulls
@@ -82,4 +94,6 @@ where it flattens.
 
 **Extension (a great Hackathon project):** turn this A/B into a *ladder* —
 GPT-2 → +RoPE → +RMSNorm → +ReLU² → … → modern — to see which single change
-contributes what. This project changes everything at once; the ladder attributes it.
+contributes what. The **+RoPE** rung is already built (`gpt2_rope.py`, the middle
+arm above); add `+RMSNorm`, `+ReLU²`, `+no-bias` trunks the same way — each a
+one-line delta from the rung before it — to attribute the rest of the 0.12.

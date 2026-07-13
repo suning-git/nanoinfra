@@ -25,10 +25,14 @@ EVAL_TOKENS = 131072
 
 ORCHESTRATOR = "modalities.text.train_text"
 
-# The two arms: (label, trunk import path).  None => the modern core GPT.
+# The arms: (label, trunk import path).  None => the modern core GPT.
+# gpt2_rope is the single-variable ablation: gpt2 with learned-abs-pos swapped
+# for RoPE and NOTHING else changed. The gpt2 -> gpt2_rope gap isolates RoPE;
+# gpt2_rope -> modern is everything else the modern trunk accumulates.
 ARMS = [
-    ("modern", None),
-    ("gpt2",   "projects.example_gpt2_vs_modern.gpt2.GPT2Trunk"),
+    ("modern",    None),
+    ("gpt2",      "gpt2.GPT2Trunk"),            # local module (this folder is on PYTHONPATH)
+    ("gpt2_rope", "gpt2_rope.GPT2RoPETrunk"),
 ]
 
 
