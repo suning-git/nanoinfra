@@ -36,9 +36,16 @@ Requires Python ≥ 3.12 and a CUDA GPU for training.
 # 1 · fetch a few FineWeb shards (into outputs/base_data/)
 python exemplars/text_pretrain/data/download_shards.py
 
-# 2 · train the model (see the exemplar README for the full train / measure / sample recipe)
+# 2 · train YOUR tokenizer on those shards (seconds; writes outputs/tokenizer/)
+python -m modalities.text.train_tokenizer
+
+# 3 · train the model (see the exemplar README for the full train / measure / sample recipe)
 CUDA_VISIBLE_DEVICES=0 python exemplars/text_pretrain/pretrain.py
 ```
+
+Yes, you train the tokenizer yourself — it's a from-scratch framework all the way
+down. Skipping step 2 falls back to the generic gpt2 vocab with a loud warning:
+training still runs, but in a different world than the exemplar's numbers.
 
 The exemplar's [`README.md`](exemplars/text_pretrain/README.md) walks the whole
 lifecycle — train → compute-optimal scaling law → inference — and

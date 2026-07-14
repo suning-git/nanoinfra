@@ -474,9 +474,11 @@ def get_tokenizer():
         return HuggingFaceTokenizer.from_directory(tokenizer_dir)
     if tiktoken is not None:
         print(f"WARNING: no tokenizer artifact in {tokenizer_dir} — falling back to the "
-              f"generic gpt2 tokenizer. Any trained checkpoint expects the TRAINED "
-              f"vocab; a mismatch typically crashes with CUDA index errors. Set "
-              f"NANOINFRA_TOKENIZER_DIR to the real tokenizer directory.")
+              f"generic gpt2 tokenizer (vocab 50257, NOT this repo's trained world; any "
+              f"trained checkpoint expects the TRAINED vocab — a mismatch typically "
+              f"crashes with CUDA index errors). Train the real artifact first: "
+              f"python -m modalities.text.train_tokenizer  (reads the downloaded FineWeb "
+              f"shards, seconds), or set NANOINFRA_TOKENIZER_DIR to an existing tokenizer dir.")
         return RustBPETokenizer.from_pretrained("gpt2")
     # fallback fake artifact: wire the canonical protocol registry explicitly
     from modalities.control import CONTROL_TOKENS, display_form

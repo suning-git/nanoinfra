@@ -18,7 +18,7 @@ Contracts (deliberately narrow):
 - The caller owns `system.eval()` and any autocast context.
 
 Verified by a greedy cross-check: cached streams bit-identical to a full-reforward
-reference (core/tests/test_kv_cache.py).
+reference (core/tests/unit/test_kv_cache.py).
 """
 
 import torch

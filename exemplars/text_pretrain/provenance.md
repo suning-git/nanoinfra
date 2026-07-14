@@ -62,3 +62,13 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python exemplars/text_pretrain/pretrain.py
 `spec.ckpt_dir()` tags checkpoints by (depth, lr), so candidate runs never
 collide. Compare only **completed** runs (warmdown included) and pick the U's
 minimum.
+
+## tokenizer.pkl provenance
+
+The exemplar's world is a rustbpe BPE, vocab 32768, with the 18 control tokens
+bundled as the last ids. The original artifact was trained on FineWeb during the
+project's earliest bring-up. The maintained rebuild entry is now
+`python -m modalities.text.train_tokenizer` (same recipe: FineWeb shards from
+base_data/, control registry from modalities/control) — retraining yields a
+same-shaped but not id-identical vocab, so checkpoints bind to the exact artifact
+they were trained with.

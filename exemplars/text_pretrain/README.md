@@ -30,7 +30,12 @@ assemble→train flow, open that file**; this project only picks knobs and drive
 
 ## How to run
 
-From the repo root:
+From the repo root. One-time prerequisites (fresh clone):
+
+```bash
+python exemplars/text_pretrain/data/download_shards.py   # FineWeb shards -> outputs/base_data/
+python -m modalities.text.train_tokenizer                # tokenizer artifact (seconds) -> outputs/tokenizer/
+```
 
 ```bash
 # 1 · train the champion  (~4.4 h on one 5090; the checkpoint may already exist)

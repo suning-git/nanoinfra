@@ -7,7 +7,7 @@ especially for selective supervision (e.g., interleaved token sequences).
 
 Usage:
     pytest nanoinfra/tests/test_loss_eval.py -v
-    python -m core.tests.test_loss_eval
+    python -m core.tests.unit.test_loss_eval
 """
 
 import torch
