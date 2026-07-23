@@ -25,6 +25,12 @@ dependencies = [
 where = ["."]
 include = ["core*", "modalities*"]
 
+# Hydra config yamls must ship in the wheel: library users compose
+# `pkg://core.configs` / `modalities/text/configs` without the source tree.
+[tool.setuptools.package-data]
+"core.configs" = ["*.yaml"]
+"modalities.text" = ["configs/*.yaml"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
