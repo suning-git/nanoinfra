@@ -20,6 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from core.model.kv_cache import STATIC
+
 # FlexAttention for flexible attention patterns (prefix-LM, document masking, etc.)
 try:
     from torch.nn.attention.flex_attention import flex_attention, create_block_mask
@@ -142,7 +144,7 @@ class CausalSelfAttention(nn.Module):
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
 
-    def forward(self, x, cos_sin, kv_cache, block_mask=None):
+    def forward(self, x, cos_sin, kv_cache, block_mask=None, attn_mask=None):
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
@@ -156,7 +158,11 @@ class CausalSelfAttention(nn.Module):
         q, k = norm(q), norm(k) # QK norm
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2) # make head be batch dim, i.e. (B, T, H, D) -> (B, H, T, D)
 
-        # Apply KV cache: insert current k,v into cache, get the full view so far
+        # Apply KV cache: insert current k,v into cache, get the full view so far.
+        # On the static path the cache is reached through an attribute rather than
+        # this argument — see core/model/kv_cache.py's STATIC.
+        if kv_cache is STATIC:
+            kv_cache = self._static_cache
         if kv_cache is not None:
             k, v = kv_cache.insert_kv(self.layer_idx, k, v)
         Tq = q.size(2) # number of queries in this forward pass
@@ -165,7 +171,23 @@ class CausalSelfAttention(nn.Module):
         # Attention: queries attend to keys/values. Multiple modes supported.
         # self.enable_gqa is branched on (not passed as a value) so each sdpa call
         # sees a literal — keeps torch.compile to ONE graph under FSDP.
-        if block_mask is not None:
+        if attn_mask is not None:
+            # Static-shape decode: k/v are the WHOLE buffer, so the mask rather than
+            # the shape says which slots are real.
+            #
+            # Written out instead of handed to sdpa on purpose: a bool attn_mask kicks
+            # sdpa off its fast kernels, measured at +0.7 ms/token over 12 layers,
+            # which is most of what this path exists to save. At decode shapes (one
+            # query, a few thousand keys) the explicit matmul and masked softmax fuse
+            # better under inductor anyway.
+            if self.enable_gqa:          # no fused GQA in a hand-written matmul
+                n_rep = self.n_head // self.n_kv_head
+                k = k.repeat_interleave(n_rep, dim=1)
+                v = v.repeat_interleave(n_rep, dim=1)
+            scores = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)
+            scores = torch.where(attn_mask, scores.float(), float("-inf"))
+            y = torch.softmax(scores, -1).to(v.dtype) @ v
+        elif block_mask is not None:
             # FlexAttention mode: use custom attention pattern (e.g., prefix-LM)
             # FlexAttention doesn't natively support GQA yet, so we expand KV heads
             if self.enable_gqa:
@@ -225,8 +247,8 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, cos_sin, kv_cache, block_mask=None):
-        x = x + self.attn(norm(x), cos_sin, kv_cache, block_mask)
+    def forward(self, x, cos_sin, kv_cache, block_mask=None, attn_mask=None):
+        x = x + self.attn(norm(x), cos_sin, kv_cache, block_mask, attn_mask)
         x = x + self.mlp(norm(x))
         return x
 
@@ -326,6 +348,23 @@ class GPT(nn.Module):
     def get_device(self):
         return self.transformer.wte.weight.device
 
+    def attach_kv_cache(self, cache):
+        """Attach a StaticKVCache, then decode with `kv_cache=STATIC`.
+
+        Two calls instead of one argument, because the argument is what breaks CUDA
+        graphs: dynamo classifies a cache passed through forward as a mutated graph
+        input and silently declines to capture. Reached as an attribute it is a static
+        address, and capture succeeds — measured 0.833 against 1.124 ms/token, with no
+        error either way, only a warning in TORCH_LOGS=cudagraphs.
+
+        Detach with `attach_kv_cache(None)`. An ordinary KVCache still travels through
+        the argument as before; this is only for the static path.
+        """
+        self._static_cache = cache
+        for block in self.blocks:
+            block.attn._static_cache = cache
+        return self
+
     def forward(self, idx, token_types=None, kv_cache=None, block_mask=None):
         """
         Transformer body only (the "trunk") — returns hidden_states [B, T, H].
@@ -351,12 +390,23 @@ class GPT(nn.Module):
         assert device == self.cos.device, f"Device mismatch: {device} != {self.cos.device}"
         assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be bfloat16"
 
-        T0 = 0 if kv_cache is None else kv_cache.get_pos()
-        cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T]
+        attn_mask = None
+        if kv_cache is STATIC:
+            # The attached cache supplies both the rotary offset and the validity mask,
+            # because both depend on how it represents "what is already cached". The
+            # mask is built HERE, once, rather than inside the attention: `pos` advances
+            # on the last layer's insert, so a per-layer mask would be right for every
+            # layer but the last.
+            cache = self._static_cache
+            cos_sin = cache.rotary(self.cos, self.sin, T)
+            attn_mask = cache.attn_mask(T, device)
+        else:
+            T0 = 0 if kv_cache is None else kv_cache.get_pos()
+            cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T]
 
         x = norm(x)
         for block in self.transformer.h:
-            x = block(x, cos_sin, kv_cache, block_mask)
+            x = block(x, cos_sin, kv_cache, block_mask, attn_mask)
         x = norm(x)
         return x
 

@@ -4,7 +4,7 @@ scaling.py — stage 2: the compute-optimal scaling law (per-model training curv
 Trains ONE run per model size (d2..d8) through the SAME blessed Orchestrator as
 pretrain (spec.ORCHESTRATOR) to a fixed token budget at CONSTANT LR, evaluating
 at ~40 LOG-SPACED steps along the way. The schedule is computed HERE and injected
-via `evaluation.text.eval_at` — core evaluators accept an explicit step set; core
+via `evaluation.eval_at` — core evaluators accept an explicit step set; core
 never computes schedules. Plotted as loss vs compute (C = 6·N·D), each size's
 curve drops -> bends -> flattens toward its capacity floor; the LOWER ENVELOPE of
 all curves is the compute-optimal frontier, from which
@@ -42,8 +42,8 @@ from pathlib import Path
 
 import numpy as np
 
-import spec
-import scaling_fit
+from . import spec
+from . import scaling_fit
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent           # repo root — the orchestrator subprocess runs here
@@ -104,8 +104,8 @@ def run_curve(depth):
         "optimizer.scheduler.warmdown_ratio": 0.0,      # constant LR after warmup —
         "optimizer.scheduler.final_lr_frac": 1.0,       #   no end-of-run warmdown dip
         "checkpoint.enabled": "false",
-        "evaluation.text.eval_at": "[" + ",".join(map(str, steps)) + "]",
-        "evaluation.text.eval_tokens": EVAL_TOKENS,
+        "evaluation.eval_at": "[" + ",".join(map(str, steps)) + "]",
+        "evaluation.eval_tokens": EVAL_TOKENS,
         "logging.log_every": 200,
     })
     print(f"[run ] d{depth} N={N/1e6:.1f}M -> {MAX_TOKENS/1e6:.0f}M tokens "

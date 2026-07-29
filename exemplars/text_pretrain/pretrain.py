@@ -16,7 +16,7 @@ The checkpoint lands in spec.ckpt_dir(); inference.py and scaling.py read from i
 import subprocess
 import sys
 
-import spec
+from . import spec
 
 
 def main():

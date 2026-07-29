@@ -9,6 +9,7 @@ init via each trunk's init_weights (meta-init: EVERY param must be set there).
 """
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -119,12 +120,46 @@ class NoAuxRouter(nn.Module):
       the raw scores (bias steers who gets picked, never how much they weigh).
     - The bias is updated online from expert load: overloaded experts get
       bias -= u, underloaded get bias += u (V3 paper's b_i += u*sign(err)).
-      Deviation vs the real training stack: we update inside forward(), i.e.
-      per micro-batch rather than per optimizer step. Documented in docs/.
+      The reference updates ONCE PER OPTIMIZER STEP, so forward() only
+      ACCUMULATES the load; the update itself lives in `step_routers()`, which
+      the training loop calls once per optimizer step. See that function for
+      why the update cannot live in forward().
+
+      What that cadence costs, measured (32 experts, top-4, sigmoid, u=1e-3,
+      grad_accum=16, 200 steps), against the earlier variant that updated once
+      per micro-batch (i.e. grad_accum times too fast). The bias does NOT grow
+      without bound — it is a closed loop and settles at a magnitude set by how
+      much steering the balance needs:
+
+          per micro-batch (16x too fast):  |bias|max 0.039  load imbalance 0.052
+          per optimizer step (reference):  |bias|max 0.015  load imbalance 0.19
+
+      The number that matters is the bias measured against the SPREAD of the
+      content scores it competes with (per-token std across experts ~0.040 at
+      init): the old cadence puts the bias at ~1.0x that spread, the reference
+      cadence at ~0.4x. So the fast controller does not "swamp" the scores by
+      orders of magnitude; it becomes comparable to them, which is enough to
+      let load, not content, pick the experts early in training.
+
+      Note this is a TRADE-OFF, not a free fix: the reference cadence balances
+      load visibly worse (0.19 vs 0.052). It is done because it is what the
+      reference does — a faithfulness fix, nothing more.
+
+      Do NOT read a quality claim into it. The wide validation hump seen in the
+      nano-glm52 reproduction was chased to this controller and then shown, on
+      2026-07-28, to be a MEASUREMENT ARTIFACT of a train/eval sequence-format
+      mismatch, not a model pathology: three arms differing only in controller
+      cadence (16x / 1x / frozen) reached identical training loss (3.946 /
+      3.948 / 3.941) while the mismatched validation metric read 4.79 / 14.12 /
+      4.24. The one arm measured with a format-matched validation stream scored
+      3.948 — equal to its training loss, with no hump at all. The controller
+      changes how badly a broken ruler misreads the model; it does not change
+      the model.
     - score_fn: 'sigmoid' (GLM-5.2 / V3) or 'sqrtsoftplus' (V4).
     """
 
-    def __init__(self, n_experts, dim, top_k, score_fn, routed_scaling, bias_update_speed=1e-3):
+    def __init__(self, n_experts, dim, top_k, score_fn, routed_scaling,
+                 bias_update_speed=1e-3):
         super().__init__()
         self.top_k = top_k
         self.n_experts = n_experts
@@ -133,6 +168,7 @@ class NoAuxRouter(nn.Module):
         self.bias_update_speed = bias_update_speed
         self.weight = nn.Parameter(torch.empty(n_experts, dim))
         self.register_buffer("e_score_correction_bias", torch.zeros(n_experts))
+        self.register_buffer("_load_accum", torch.zeros(n_experts), persistent=False)  # transient: never in state_dict
 
     def _scores(self, logits):
         if self.score_fn == "sigmoid":
@@ -153,10 +189,90 @@ class NoAuxRouter(nn.Module):
         topk_weight = topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20)
         if self.training:
             with torch.no_grad():
-                load = torch.bincount(topk_idx.flatten(), minlength=self.n_experts).float()
-                err = load.mean() - load  # positive = underloaded
-                self.e_score_correction_bias += self.bias_update_speed * err.sign()
+                # ONLY accumulate here. forward() sees one micro-batch on one rank;
+                # the controller is defined over the whole optimizer step on the whole
+                # global batch. step_routers() is where those shards are summed.
+                if self._load_accum.dtype != torch.float32:
+                    self._load_accum.data = self._load_accum.data.float()
+                self._load_accum += torch.bincount(
+                    topk_idx.flatten(), minlength=self.n_experts).float()
+                # NOTHING ELSE GOES HERE. In particular, no Python int counter:
+                # torch.compile treats an nn.Module's integer attributes as STATIC and
+                # guards on their value, so `self._micro += 1` recompiles the graph on
+                # every forward, blows past cache_size_limit, and silently drops the
+                # whole frame back to eager. Dynamo names it outright:
+                # "___stack1._micro == 0 ... torch.compile considers integer attributes
+                # of the nn.Module to be static" (13 recompiles in 8 forwards, plus a
+                # graph break). This cost the fast arm most of its throughput and NONE
+                # of the correctness gates caught it — they all ran uncompiled.
+                # Accumulate into the tensor buffer only; anything that needs a count
+                # reads it from there (routers_pending_load).
         return topk_idx, (topk_weight * self.routed_scaling).to(flat_x.dtype)
+
+
+def step_routers(model) -> int:
+    """Apply ONE load-balancing update to every NoAuxRouter. Call once per
+    OPTIMIZER STEP (not per micro-batch), after the last micro-backward.
+
+    Why this is not inside forward(). The controller's input is the expert load
+    over the whole optimizer step's global batch, but forward() only ever sees
+    ONE SHARD of that batch. The global batch is split two ways at once:
+
+        global batch  =  grad_accum micro-batches  x  world_size ranks
+
+    forward() is blind to both. Updating inside it therefore gets the cadence
+    wrong (it fires grad_accum times too often) AND, under data parallelism, the
+    load wrong (each rank sees only its own shard). The second one is the nastier
+    of the two: it is a BUFFER, so DDP's gradient all-reduce does not touch it,
+    and the replicas' routers silently drift apart while training looks healthy.
+    Measured on 2 GPUs before this was moved here: all 9 routers had diverged by
+    the end of step 0, while every parameter stayed bit-identical.
+
+    Summing both shards is the same one reduction, so both defects close here.
+    Returns the number of routers stepped, so callers can log it.
+    """
+    routers = [m for m in model.modules() if isinstance(m, NoAuxRouter)]
+    if not routers:
+        return 0
+    with torch.no_grad():
+        for m in routers:
+            if m._load_accum.dtype != torch.float32:
+                m._load_accum.data = m._load_accum.data.float()
+            if m.e_score_correction_bias.dtype != torch.float32:
+                m.e_score_correction_bias.data = m.e_score_correction_bias.data.float()
+        if dist.is_available() and dist.is_initialized():
+            # One collective for all routers, not one each. It runs outside forward
+            # and outside the backward's comm stream, so it cannot race the gradient
+            # all-reduces; and every rank reaches it in the same place, so the
+            # collective ordering NCCL requires is satisfied by construction.
+            flat = torch.cat([m._load_accum for m in routers])
+            dist.all_reduce(flat, op=dist.ReduceOp.SUM)
+            off = 0
+            for m in routers:
+                n = m._load_accum.numel()
+                m._load_accum.copy_(flat[off:off + n])
+                off += n
+        for m in routers:
+            err = m._load_accum.mean() - m._load_accum   # positive = underloaded
+            m.e_score_correction_bias += m.bias_update_speed * err.sign()
+            m._load_accum.zero_()
+    return len(routers)
+
+
+def routers_pending_load(model) -> float:
+    """Total expert-load still sitting in the routers, un-applied.
+
+    The safety net for "the training loop forgot to call step_routers()". It is a
+    FUNCTION rather than a counter inside forward() on purpose: a Python int
+    attribute mutated in forward is guarded by torch.compile and recompiles the
+    graph every step (see the note in NoAuxRouter.forward). Call it from a test or
+    once at the end of a run; zero cost on the hot path.
+
+    Returns 0.0 right after a step_routers() call, and grows with every micro-batch
+    that is never stepped.
+    """
+    return float(sum(m._load_accum.sum().item()
+                     for m in model.modules() if isinstance(m, NoAuxRouter)))
 
 
 class HashRouter(nn.Module):

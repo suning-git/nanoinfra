@@ -1,19 +1,21 @@
 """
 FineWeb streaming loader — text's production data path.
 
-Streams FineWeb **parquet** shards from disk by ``split``, tokenizes documents
-on the fly (BPE, bos-prepended, multi-threaded), packs the token stream into
+Streams an EXPLICIT list of FineWeb **parquet** files, tokenizes documents on
+the fly (BPE, bos-prepended, multi-threaded), packs the token stream into
 ``[B, T]`` windows. Used by ``TextDataSource`` and ``TextEvaluator``. The
 ``token_data_loader`` entry point also dispatches to core's modality-free
 synthetic/byte-stream loader (``source="synthetic"`` / ``data_path=...``) so
 the callers stay source-agnostic for smoke tests.
 
-Resume state for the parquet path is ``{pq_idx, rg_idx, epoch}`` (parquet index +
-row-group index).
+Which files constitute a split is NOT decided here — it is declared in config
+and resolved by ``modalities.text.datasets.resolve_split``. This module only
+consumes the resulting list. (The predecessor inferred ``val`` as "whichever
+shard sorts last", so downloading a shard silently changed the ruler; see
+``datasets.py`` for the full account.)
 
-Parquet layout on disk (nanochat convention): ``get_base_dir()/base_data/*.parquet``,
-sorted; all-but-last shard = ``train``, last shard = ``val``. Override the directory
-with env ``NANOINFRA_DATA_DIR`` or the ``data_dir`` argument.
+Resume state for the parquet path is ``{files, pq_idx, rg_idx, epoch}`` (the file
+list identifies WHAT was being read; the indices identify how far in).
 """
 
 from __future__ import annotations
@@ -60,17 +62,7 @@ def list_parquet_files(data_dir: Optional[str] = None) -> list[str]:
     return [os.path.join(data_dir, f) for f in files]
 
 
-def _split_paths(split: str, data_dir: Optional[str]) -> list[str]:
-    """All-but-last shard = train, last shard = val (nanochat convention)."""
-    assert split in ("train", "val"), "split must be 'train' or 'val'"
-    paths = list_parquet_files(data_dir)
-    if len(paths) == 1:
-        # Single shard available: use it for both (small-scale dev convenience).
-        return paths
-    return paths[:-1] if split == "train" else paths[-1:]
-
-
-def _document_batches(split, data_dir, resume_state_dict, tokenizer_batch_size, rank, world_size):
+def _document_batches(parquet_paths, resume_state_dict, tokenizer_batch_size, rank, world_size):
     """
     Infinite iterator over document batches (lists of text strings) from parquet.
 
@@ -79,7 +71,8 @@ def _document_batches(split, data_dir, resume_state_dict, tokenizer_batch_size, 
     """
     import pyarrow.parquet as pq
 
-    parquet_paths = _split_paths(split, data_dir)
+    if not parquet_paths:
+        raise ValueError("no parquet files for this split (see modalities/text/datasets.py)")
 
     resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict else 0
     resume_rg_idx = resume_state_dict.get("rg_idx") if resume_state_dict else None
@@ -113,10 +106,9 @@ def _document_batches(split, data_dir, resume_state_dict, tokenizer_batch_size, 
 def _fineweb_token_loader(
     B: int,
     T: int,
-    split: str,
+    files: list[str],
     resolved_device: torch.device,
     resume_state_dict: Optional[dict[str, Any]],
-    data_dir: Optional[str],
     tokenizer,
     tokenizer_threads: int,
     tokenizer_batch_size: int,
@@ -148,7 +140,7 @@ def _fineweb_token_loader(
     layout.add_range(2, vocab_size - n_control, vocab_size)  # control
 
     batches = _document_batches(
-        split, data_dir, resume_state_dict, tokenizer_batch_size, rank, world_size,
+        files, resume_state_dict, tokenizer_batch_size, rank, world_size,
     )
 
     needed = B * T + 1
@@ -178,7 +170,7 @@ def _fineweb_token_loader(
             "targets": targets,
             "target_types": target_types,
             "state_dict": {
-                "split": split,
+                "files": [os.path.basename(f) for f in files],
                 "pq_idx": pq_idx,
                 "rg_idx": rg_idx,
                 "epoch": epoch,
@@ -193,14 +185,13 @@ def _fineweb_token_loader(
 def token_data_loader(
     B: int,
     T: int,
-    split: str = "train",
+    files: Optional[list[str]] = None,
     device: str | torch.device = "cuda",
     resume_state_dict: Optional[dict[str, Any]] = None,
     data_path: Optional[str] = None,
     vocab_size: int = 65536,
     seed: int = 0,
     source: Optional[str] = None,
-    data_dir: Optional[str] = None,
     tokenizer: Any = None,
     tokenizer_threads: int = 4,
     tokenizer_batch_size: int = 128,
@@ -211,19 +202,28 @@ def token_data_loader(
     Source selection:
       - ``data_path`` set        → deterministic byte stream (offline reproducibility).
       - ``source == "synthetic"``→ deterministic random tokens (smoke tests).
-      - otherwise (default)      → real on-the-fly FineWeb parquet streaming.
+      - otherwise (default)      → real FineWeb parquet streaming over ``files``.
+
+    ``files`` is an EXPLICIT list of parquet paths — resolve it with
+    ``modalities.text.datasets.resolve_split(data_cfg, dataset, split)``. There is
+    deliberately no ``split=`` shortcut any more: inferring the validation set
+    from the directory listing is the bug this refactor removes.
 
     All paths yield the SAME dict shape:
       ``{idx:[B,T], token_types:[B,T], targets:[B,T], target_types:[B,T], state_dict}``
     so the callers (TextDataSource, TextEvaluator) are source-agnostic.
-    Only the *content* and the ``state_dict`` keys differ.
     """
     if data_path is not None or source == "synthetic":
         return synthetic_token_loader(
-            B, T, split=split, device=device, resume_state_dict=resume_state_dict,
+            B, T, split="train", device=device, resume_state_dict=resume_state_dict,
             data_path=data_path, vocab_size=vocab_size, seed=seed,
         )
+    if not files:
+        raise ValueError(
+            "token_data_loader needs an explicit `files=[...]`. Resolve it via "
+            "modalities.text.datasets.resolve_split(data_cfg, dataset, split)."
+        )
     return _fineweb_token_loader(
-        B, T, split, _resolve_device(device), resume_state_dict, data_dir,
+        B, T, files, _resolve_device(device), resume_state_dict,
         tokenizer, tokenizer_threads, tokenizer_batch_size,
     )

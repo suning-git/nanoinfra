@@ -36,6 +36,7 @@ sys.path.insert(0, str(PROJ))
 
 import modalities.text
 from modalities.text.train_text import SOURCE_TYPES, assemble_vocab
+from modalities.text.streams import build_evaluators, report, resolve_sources
 from modalities.text import TextEvaluator, get_tokenizer
 from core.training.model_setup import build_system, print0
 from core.training.trainer import Trainer, create_optimizers
@@ -45,6 +46,18 @@ from core.data.mixed_dataloader import MixedDataLoader
 from arch.nano_dsv4 import NanoDSV4, NanoDSV4Config
 
 CONFIG_DIR = Path(modalities.text.__file__).resolve().parent / "configs"
+
+# MIGRATION BRIDGE — delete once every historical curve has been re-run.
+# `recipe: null` means "assemble nothing": raw packing with a bos only, which is
+# the pre-2026-07-26 evaluation ruler. Measuring it alongside the real one lets
+# this project reconnect its historical curves and quantify how much the old
+# ruler distorted them. That is THIS PROJECT's migration problem, not a property
+# of the text modality — so it is declared here, and the modality's shipped
+# config (modalities/text/configs/train_text.yaml) carries only the final stream.
+RAW_RULER_STREAM = {
+    "name": "text_raw", "dataset": "fineweb", "split": "val",
+    "recipe": None, "metric": "val/text_ce_raw",
+}
 
 
 def make_trunk(arch, seq, layout, gpt_depth=12, gpt_dim=768, gpt_heads=6):
@@ -82,6 +95,31 @@ def eval_schedule(max_steps, n_evals=40, first=20):
     return [p for p in pts if p < max_steps]
 
 
+def _wire_router_step(system, optimizers):
+    """Fire the MoE load-balancing controller once per optimizer step.
+
+    core's Trainer has no per-step hook, so we hang it off ONE optimizer's step()
+    (project-side monkey-patch, core untouched — same move as trainer.autocast_ctx).
+    Exactly one optimizer is wrapped, so it fires exactly once per step.
+    Announced in the log because a silent controller is how nano-glm52's bug hid.
+    """
+    from arch.parts import NoAuxRouter, step_routers
+    n = sum(1 for m in system.trunk.modules() if isinstance(m, NoAuxRouter))
+    if not n:
+        return
+    opt = optimizers[-1]
+    inner = opt.step
+
+    def step_then_routers(*a, **kw):
+        inner(*a, **kw)
+        step_routers(system.trunk)
+
+    opt.step = step_then_routers
+    print0(f"[router] step_routers wired to optimizer step -> {n} router(s); "
+           f"one signed update of {1e-3:.1e} per OPTIMIZER step, from the load summed "
+           f"over all micro-batches and all ranks")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arch", required=True, choices=["dsv4", "gpt"])
@@ -95,6 +133,11 @@ def main():
     ap.add_argument("--gpt-dim", type=int, default=768)
     ap.add_argument("--gpt-heads", type=int, default=6)
     ap.add_argument("--dry", action="store_true", help="build + param count + one timed fwd/bwd, no training")
+    ap.add_argument("--raw-ruler", action="store_true",
+                    help="also measure val/text_ce_raw, the pre-2026-07-26 ruler "
+                         "(raw packing, bos only). Migration bridge for reconnecting "
+                         "this project's historical curves; doubles evaluation cost. "
+                         "See RAW_RULER_STREAM.")
     args = ap.parse_args()
     name = args.name or f"nano_{args.arch}"
 
@@ -123,6 +166,11 @@ def main():
     system = setup["system"]
     param_account(system.trunk, args.arch)
 
+    # noaux_tc balance controller runs per OPTIMIZER step, but forward() runs per
+    # micro-batch (and per rank under data parallelism), so forward only ACCUMULATES
+    # load and step_routers() applies the update — wired to the optimizer step below,
+    # once `optimizers` exists. See parts.py:step_routers for why.
+
     # --- aux-loss wrap (indexer KL): produced in train mode only; pops to None at eval ---
     if hasattr(system.trunk, "pop_aux_loss"):
         orig_loss = system.loss
@@ -134,16 +182,12 @@ def main():
 
         system.loss = loss_with_aux
 
-    sources = []
-    for sc in config["data"]["sources"]:
-        sc = dict(sc)
-        sc.setdefault("sequence_len", args.seq_len)
-        sc.setdefault("device", "cuda")
-        sources.append(sc)
+    sources = resolve_sources(config["data"], args.seq_len, device="cuda")
+    tokenizers = {"text": tokenizer, "layout": layout, "control_resolver": resolver}
     dataloader = MixedDataLoader(
         loader_config={"batch_size": args.device_batch_size,
                        "data": {"sequence_len": args.seq_len, "sources": sources}},
-        tokenizers={"text": tokenizer, "layout": layout, "control_resolver": resolver},
+        tokenizers=tokenizers,
         source_types=SOURCE_TYPES, resume_state_dict=None,
     )
 
@@ -165,11 +209,18 @@ def main():
         return
 
     optimizers = create_optimizers(system, config["optimizer"], world_size=setup["world_size"])
+    _wire_router_step(system, optimizers)
 
-    eval_cfg = dict(config.get("evaluation", {}).get("text", {}))
     if args.max_steps > 0:
-        eval_cfg["eval_at"] = eval_schedule(args.max_steps)
-    evaluators = [TextEvaluator(eval_cfg, args.device_batch_size, args.seq_len)]
+        config["evaluation"]["eval_at"] = eval_schedule(args.max_steps)
+    if args.raw_ruler:
+        config["evaluation"]["streams"] = [*config["evaluation"]["streams"],
+                                           dict(RAW_RULER_STREAM)]
+    evaluators = build_evaluators(config, tokenizers, SOURCE_TYPES,
+                                  args.device_batch_size, args.seq_len, device="cuda")
+    # Print the training and evaluation rulers side by side: this bug survived
+    # for months because only the training side ever spoke in the log.
+    report(config, sources, evaluators, printer=print0)
 
     trainer = Trainer(system=system, optimizers=optimizers, dataloader=dataloader,
                       config=config, rank=setup["rank"], world_size=setup["world_size"],

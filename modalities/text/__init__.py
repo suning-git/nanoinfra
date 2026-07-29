@@ -18,6 +18,7 @@ from modalities.text.tokenizer import (
 )
 from modalities.text.fineweb import token_data_loader, list_parquet_files
 from modalities.text.data_source import TEXT_RECIPE, TextDataSource, create_recipe
+from modalities.text.datasets import describe, fingerprint, resolve_split
 from modalities.text.evaluator import TextEvaluator
 
 TYPE_ID = 0  # canonical (0=text, 1=motion, 2=control)

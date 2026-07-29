@@ -46,7 +46,25 @@ if not OmegaConf.has_resolver("eval"):
     OmegaConf.register_new_resolver(
         "eval", lambda expr: eval(expr, {"__builtins__": {}}, {"max": max, "min": min}))
 
-from core.training.model_setup import build_system, print0
+# core/configs must be findable no matter WHICH config is primary. Declaring
+# `hydra.searchpath` in train_text.yaml only works while train_text.yaml is the one
+# invoked — hydra ignores the key from any config reached through a defaults list, so
+# a sibling config that inherits this one (train_text_1p4b.yaml) could not resolve
+# train_base. Registering a search-path plugin applies it either way.
+from hydra.core.config_search_path import ConfigSearchPath
+from hydra.core.plugins import Plugins
+from hydra.plugins.search_path_plugin import SearchPathPlugin
+
+
+class _CoreConfigs(SearchPathPlugin):
+    def manipulate_search_path(self, search_path: ConfigSearchPath) -> None:
+        search_path.append(provider="nanoinfra", path="pkg://core.configs")
+
+
+Plugins.instance().register(_CoreConfigs)
+
+from core.training.model_setup import build_system, compile_blocks, print0
+from core.parallel import NanoDDP, block_buckets
 from core.training.trainer import Trainer, create_optimizers
 from core.model.gpt import GPT, GPTConfig  # WHICH model = this orchestrator's decision
 from core.data.mixed_dataloader import MixedDataLoader
@@ -55,7 +73,8 @@ import modalities.text
 import modalities.control
 from modalities.assembler import build_layout
 from modalities.control import CONTROL_TOKENS, display_form, make_control_resolver
-from modalities.text import TextEvaluator, get_tokenizer
+from modalities.text import get_tokenizer
+from modalities.text.streams import build_evaluators, report, resolve_sources
 
 # The orchestrator composes the source fragments of the mounted modalities.
 SOURCE_TYPES = {
@@ -142,21 +161,41 @@ def main(cfg: DictConfig) -> None:
     trunk_cls = resolve_trunk(model_config.get('trunk_class'))
     print0(f"\nAssembling d{depth} {trunk_cls.__name__} (dim={model_dim}, heads={num_heads}, "
            f"vocab={layout.vocab_size})...")
-    setup = build_system(trunk_cls, gpt_config, use_compile=config.get('use_compile', True),
+    # Multi-GPU strategy. "ddp" replicates the model and reduces gradients during
+    # backward; "fsdp" shards parameters. Which one wins is a property of the model,
+    # not a preference: while the model FITS, the bottleneck is activations, so
+    # sharding parameters costs an all-gather per block and buys nothing. Sharding
+    # earns its keep when the model stops fitting. Ignored on a single GPU.
+    parallel = config.get('parallel', 'fsdp')
+
+    # Per-block compile under DDP is not a style choice. A whole-graph compile makes
+    # AOTAutograd finalize every gradient at the very END of backward (pytorch#109774),
+    # so every all_reduce piles up after the compute instead of overlapping it. Compiling
+    # each block separately leaves the seams where the gradient hooks can fire.
+    whole_graph_compile = config.get('use_compile', True) and parallel != 'ddp'
+    setup = build_system(trunk_cls, gpt_config, use_compile=whole_graph_compile,
+                                                parallel=parallel,
                                                 seed=config.get('seed', 42))
     system = setup['system']
     rank = setup['rank']
     world_size = setup['world_size']
 
+    ddp = None
+    if world_size > 1 and parallel == 'ddp':
+        if config.get('use_compile', True):
+            compile_blocks(system.trunk)
+        # Bucket ORDER is part of NanoDDP's contract: NCCL pairs collectives by issue
+        # order, so every rank must issue them in the same sequence. block_buckets()
+        # returns completion order (last block first); the LM head completes before any
+        # block, so it goes at the FRONT.
+        ddp = NanoDDP([[p for p in system.head.parameters() if p.requires_grad]]
+                      + block_buckets(system.trunk), module=system)
+        print0(f"  NanoDDP: {len(ddp.buckets)} buckets across {world_size} replicas")
+
     # --- Data: the TWO system objects (layout + resolver) ride the shared bag ---
     data_config = config['data']
     device = 'cuda'
-    sources = []
-    for sc in data_config['sources']:
-        sc = dict(sc)
-        sc.setdefault('sequence_len', sequence_len)
-        sc.setdefault('device', device)
-        sources.append(sc)
+    sources = resolve_sources(data_config, sequence_len, device=device)
 
     loader_config = {
         'batch_size': device_batch_size,
@@ -177,12 +216,12 @@ def main(cfg: DictConfig) -> None:
     print0("Creating optimizers...")
     optimizers = create_optimizers(system, optimizer_config, world_size=world_size)
 
-    # --- Evaluators (each modality's own, injected) ---
-    eval_config = config.get('evaluation', {})
-    evaluators = []
-    text_eval = eval_config.get('text', {})
-    if text_eval.get('enabled', True):
-        evaluators.append(TextEvaluator(text_eval, device_batch_size, sequence_len))
+    # --- Evaluators: declared streams, assembled by the SAME path as training ---
+    tokenizers = {'text': tokenizer, 'layout': layout, 'control_resolver': control_resolver}
+    evaluators = build_evaluators(config, tokenizers, SOURCE_TYPES,
+                                  device_batch_size, sequence_len, device=device)
+    # Both rulers speak in the log — this bug survived because only training did.
+    report(config, sources, evaluators, printer=print0)
 
     # --- Trainer ---
     print0("Creating trainer...")
@@ -195,6 +234,7 @@ def main(cfg: DictConfig) -> None:
         world_size=world_size,
         debug_tokenizer=tokenizer,
         evaluators=evaluators,
+        ddp=ddp,
     )
 
     print0("Starting training...\n")

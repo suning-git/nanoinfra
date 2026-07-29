@@ -1,0 +1,13 @@
+scenarios/deathmatch_simple.cfg
+scenarios/deathmatch_simple.wad
+
+    The VizDoom scenario this exemplar records on, from the gameNgen-repro project
+    (https://github.com/arnaudstiegler/gameNgen-repro), which is licensed under
+    Apache-2.0.
+
+    The .wad is a map-only PWAD: six lumps holding level geometry (UDMF TEXTMAP),
+    a compiled BSP, and ACS scripts. It contains no graphics, sprites, sounds or
+    flats — it references texture names that the base IWAD provides.
+
+    The base IWAD is freedoom2.wad, which ships with the `vizdoom` package and is
+    not redistributed here.

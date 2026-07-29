@@ -1,0 +1,5 @@
+# Run products stay on disk: gifs and feature arrays are megabytes each,
+# and they are regenerable by re-running generate.py against a checkpoint.
+*.gif
+*.npz
+*.png

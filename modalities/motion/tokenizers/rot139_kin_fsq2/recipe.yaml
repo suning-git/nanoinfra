@@ -1,0 +1,24 @@
+# rot139_kin_fsq2 — the recipe that reproduces this tokenizer.
+# convae.train.train_codec(recipe, out_path) regenerates the artifact from this.
+# (The messy search that FOUND this recipe stays in projects/; this is the winner.)
+
+rep: rot139
+quantizer: fsq2
+d_feat: 139
+levels: [8, 8, 8]      # 512 codes
+code_dim: 512
+width: 512
+downsample: 4          # 4 frames / code @30fps
+
+# objective: reconstruction + kinematic loss (FK position + velocity + foot-contact)
+lam: 100.0             # applied to each of pos/vel/foot
+
+# optimization
+lr: 2.0e-4
+bs: 256
+steps: 30000
+max_windows: 500000
+seed: 0
+
+# data
+data: bones_seed       # 6.7x AMASS, actor-split val

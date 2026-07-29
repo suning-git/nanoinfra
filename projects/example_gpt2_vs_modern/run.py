@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-import spec
+from . import spec
 
 HERE = Path(__file__).resolve().parent
 RESULTS = HERE / "results"

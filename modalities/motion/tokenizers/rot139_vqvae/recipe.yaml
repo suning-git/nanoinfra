@@ -1,0 +1,27 @@
+# rot139_vqvae — the recipe that reproduces this tokenizer.
+# ⚠ BEST-EFFORT (research-origin): the report.md checkpoint records feature-MSE
+# training (no kin loss) over >=5k steps but does NOT pin exact steps/lr. These
+# values reproduce the FAMILY faithfully (plain feature-MSE VQ on AMASS); the
+# original weights in models/motion/ are the reference. See card.md.
+
+rep: rot139
+quantizer: vq
+d_feat: 139
+n_codes: 512
+code_dim: 512
+width: 512
+downsample: 4
+commit_weight: 0.25
+
+# objective: PLAIN feature MSE + commitment — NO kinematic loss (this predates it)
+lam: 0.0
+
+# optimization (best-effort; original not fully pinned)
+lr: 2.0e-4
+bs: 256
+steps: 30000
+max_windows: 500000
+seed: 0
+
+# data
+data: amass

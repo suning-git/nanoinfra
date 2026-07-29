@@ -25,19 +25,23 @@ TEXT_RECIPE = SequenceRecipe(
     supervise='all',
 )
 
-_DEFAULT_RECIPES = {
-    'text': TEXT_RECIPE,
-}
 
+def create_recipe(recipe_config: Optional[Dict] = None,
+                  source_type: str = 'text') -> SequenceRecipe:
+    """Build a SequenceRecipe from config. ``None`` means NO assembly (raw packing).
 
-def create_recipe(
-    recipe_config: Optional[Dict] = None, source_type: str = 'text'
-) -> SequenceRecipe:
-    """Create recipe from config dict, or return default for source_type."""
+    There is deliberately no invisible default. The predecessor did::
+
+        if recipe_config is None:
+            return _DEFAULT_RECIPES[source_type]   # never appeared in yaml or logs
+
+    so training silently assembled ``bos/text_start/…/text_end/eos`` while the
+    evaluator, which never went through here at all, packed raw text with only a
+    bos. The two rulers disagreed for months without a single log line. Now the
+    recipe is named in config and printed at startup by both sides.
+    """
     if recipe_config is None:
-        if source_type not in _DEFAULT_RECIPES:
-            raise ValueError(f"No default recipe for source_type: {source_type}")
-        return _DEFAULT_RECIPES[source_type]
+        return None
 
     return SequenceRecipe(
         template=recipe_config['template'],
@@ -65,9 +69,29 @@ class TextDataSource(DataSource):
         self._layout = tokenizers['layout']
         self._control_resolver = tokenizers['control_resolver']
 
-        # Create recipe
-        recipe_config = config.get('recipe')
-        self.recipe = create_recipe(recipe_config, source_type='text')
+        # Recipe: resolved by the orchestrator and passed in as a dict. Required —
+        # a source that assembles nothing must say so explicitly (`recipe: null`).
+        if 'recipe' not in config:
+            raise KeyError(
+                "TextDataSource: `recipe` is required (name it in config; use "
+                "`recipe: null` for raw packing). No invisible default — that is "
+                "exactly how train/val drifted apart."
+            )
+        self.recipe_name = config.get('recipe_name', '<inline>')
+        self.recipe = create_recipe(config['recipe'], source_type='text')
+        if self.recipe is None:
+            raise ValueError(
+                "TextDataSource requires a real recipe; for raw packing use "
+                "token_data_loader directly (see TextEvaluator's raw bridge stream)."
+            )
+
+        # Which files this source reads — resolved by the orchestrator, never inferred.
+        self.files = config.get('files')
+        if not self.files:
+            raise KeyError(
+                "TextDataSource: `files` is required — resolve it with "
+                "modalities.text.datasets.resolve_split(data_cfg, dataset, split)."
+            )
 
         self.sequence_len = config['sequence_len']
         # TEXT_RECIPE has no constants, so overhead is just the control-token count
@@ -107,7 +131,8 @@ class TextDataSource(DataSource):
         print(f"TextDataSource initialized:")
         print(f"  sequence_len={self.sequence_len}, text_len={self.text_len}")
         print(f"  buffer_batch_size={self.buffer_batch_size}, split={self.split}")
-        print(f"  recipe template={self.recipe.template}")
+        print(f"  recipe[{self.recipe_name}] template={self.recipe.template}")
+        print(f"  files={[f.rsplit('/', 1)[-1] for f in self.files]}")
         if self._resume_state is not None:
             print(f"  resume_state={self._resume_state}")
 
@@ -115,7 +140,7 @@ class TextDataSource(DataSource):
         base_loader = token_data_loader(
             B=self.buffer_batch_size,
             T=self.text_len,
-            split=self.split,
+            files=self.files,
             tokenizer_threads=self.tokenizer_threads,
             tokenizer_batch_size=self.tokenizer_batch_size,
             device=self.device,

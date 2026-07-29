@@ -31,13 +31,13 @@ From the repo root (single GPU):
 
 ```bash
 # reproduce nano-dsv4 (~92M active params)
-python projects/nano_dsv4/scripts/train_nano.py --arch dsv4 --max-steps 4000
+python projects/frontier_arch/scripts/train_nano.py --arch dsv4 --max-steps 4000
 
 # a params-matched GPT baseline for comparison
-python projects/nano_dsv4/scripts/train_nano.py --arch gpt --gpt-dim 800 --gpt-heads 8 --max-steps 4000
+python projects/frontier_arch/scripts/train_nano.py --arch gpt --gpt-dim 800 --gpt-heads 8 --max-steps 4000
 
 # build + parameter accounting + one timed forward/backward, no training
-python projects/nano_dsv4/scripts/train_nano.py --arch dsv4 --dry
+python projects/frontier_arch/scripts/train_nano.py --arch dsv4 --dry
 ```
 
 Result at 4000 steps (≈0.52B tokens, same data / eval): nano-dsv4 reaches a lower
@@ -49,9 +49,12 @@ architectural, not a parameter-count artifact.
 - **Training-mode only.** No inference KV cache, sliding-window cache, or
   compressor cross-step state — over half of the original code's complexity is in
   serving incremental decode, which a single training forward never touches.
-- **Reference implementation, eager.** Runs at ~8% MFU (data-dependent expert
-  loop / top-k). Meant to be read and to verify the architecture trains, not for
-  throughput-optimized training.
+- **Reference implementation, eager.** `arch/nano_dsv4.py` is meant to be read and
+  to verify the architecture trains, not for throughput-optimized training — it
+  runs at single-digit MFU (data-dependent expert loop / top-k). A same-architecture
+  high-throughput implementation exists (3.7–4.2x throughput, byte-identical parameter
+  tree, so checkpoints interchange); it is not included here because it is not yet
+  stable enough for long runs.
 - **Every shrink is deliberate.** Each dimension differs from the original for a
   reason recorded in the config (`NanoDSV4Config`); unrelated quantities are kept
   numerically distinct so shapes never collide when you read them.

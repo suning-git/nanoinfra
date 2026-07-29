@@ -1,0 +1,57 @@
+# train_text_1p4b.yaml — a 1.4B text model across GPUs with replicated data parallel.
+#
+# Same orchestrator as train_text.yaml; this file changes only the size, the sequence
+# length, and the parallel strategy.
+#
+#   torchrun --nproc_per_node=2 --standalone \
+#       -m modalities.text.train_text --config-name train_text_1p4b
+#
+# A smoke run first, which is what you want before committing a machine to it:
+#
+#   torchrun --nproc_per_node=2 --standalone \
+#       -m modalities.text.train_text --config-name train_text_1p4b \
+#       max_steps=20 optimizer.scheduler.warmup_steps=5 checkpoint.enabled=false
+
+defaults:
+  - train_text
+  - _self_
+
+# 30 layers x 1920 dim = 1.45B: a 1.33B trunk plus 0.13B of embedding and
+# un-embedding over the 32768-token vocabulary. Both derivations are the house rules
+# the base config states — dim = 64*depth, heads 128 wide — so this is on-family
+# rather than a one-off shape, and depth alone would reproduce it.
+model:
+  depth: 30
+  dim: ${eval:'${model.depth} * 64'}
+  n_head: ${eval:'max(1, (${model.dim} + 127) // 128)'}
+  n_kv_head: ${model.n_head}
+
+# Long sequences are where data parallelism starts to pay. Communication per step is
+# fixed by the parameter count while compute grows with tokens, so
+#
+#     comm / compute  ~=  2087 / (tokens per GPU per step)
+#
+# — independent of model SIZE, because gradient bytes and FLOPs both scale with
+# parameters. At 512 tokens per step a step is mostly communication and no overlap
+# can save it; at 8192 it is roughly a quarter, and hiding it inside the backward is
+# worth real time (measured at this size: backward 384ms -> 312ms).
+sequence_len: 8192
+device_batch_size: 1
+total_batch_size: 65536
+
+# Replicate rather than shard. At 1.4B and this sequence length the model still fits,
+# about 19GB per GPU, so sharding parameters would add an all-gather per block per
+# step and save nothing. Switch to fsdp when it stops fitting — that is the signal,
+# not the parameter count on its own.
+parallel: ddp
+
+max_steps: 20000
+
+# Measured, 2 x RTX 5090 (PCIe, no NVLink), this exact config at max_steps=10:
+#   1.45B parameters, 32 buckets, 585 ms/step, 28.0k tok/s, MFU 93.5%, 21.7 GB/GPU.
+# The MFU is high because a 8192-token step is compute-bound at this size — which is
+# the same fact as the comm/compute ratio above, seen from the other side.
+
+optimizer:
+  scheduler:
+    warmup_steps: 300

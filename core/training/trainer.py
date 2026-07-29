@@ -3,6 +3,24 @@ Trainer for Nanoinfra GPT models.
 
 Single-stage training class that can be used standalone or within curriculum training.
 Extensible via inheritance for domain-specific trainers.
+
+ONE seam exists in `_training_step` that is worth knowing about before you subclass
+or edit it.
+
+  `ddp=None` — replicated data parallelism. FSDP synchronizes gradients from inside
+  its own module hooks, so this loop never had to know that synchronization exists at
+  all. NanoDDP (core/parallel/nano_ddp.py) reduces per bucket DURING backward and must
+  be told which micro-backward is the last one, so it reduces once per optimizer step
+  rather than once per micro-step. The whole mechanism is the one
+  `with sync_gradients(...)` around loss.backward(); that helper is a no-op when ddp
+  is None, so a single-device or FSDP run takes exactly the path it always did, and
+  there is no `if ddp is not None` in the hot loop.
+
+A DIFFERENT OBJECTIVE needs no seam here, and deliberately has none. Write your own
+System with the same `loss(batch)` contract and hand it in — that is what
+core/model/system.py prescribes, and it names a diffusion head as the example.
+Subclassing LMSystem rather than wrapping it keeps `state_dict()` keys unchanged, so
+such a System's checkpoints stay interchangeable with any other over the same trunk.
 """
 
 import os
@@ -17,6 +35,7 @@ import torch
 
 from core.utils import print0, DummyWandb
 from core.training.lr_schedulers import get_lr_multiplier
+from core.parallel import sync_gradients
 
 
 def create_optimizers(system, optimizer_config: dict, world_size: int):
@@ -114,6 +133,7 @@ class Trainer:
         world_size,
         debug_tokenizer=None,  # Optional tokenizer for debug printing
         evaluators=None,       # List of Evaluator objects for validation
+        ddp=None,              # Optional NanoDDP for replicated data parallel
     ):
         """
         Initialize Trainer.
@@ -137,7 +157,12 @@ class Trainer:
                 - wandb: Wandb config dict (optional)
             rank: Distributed rank
             world_size: Distributed world size
+            ddp: Optional gradient synchronizer for REPLICATED data parallel
+                (core.training.data_parallel.NanoDDP). None under FSDP or on one
+                GPU, where nothing extra is needed: FSDP reduces inside its own
+                hooks, and one GPU has nothing to reduce.
         """
+        self.ddp = ddp
         self.system = system
         self.optimizers = optimizers
         self.dataloader = dataloader
@@ -458,7 +483,7 @@ class Trainer:
             # Track dataloader state from last batch
             last_dataloader_state = batch.get('state_dict')
 
-            # Forward pass with autocast (FSDP handles gradient sync automatically)
+            # Forward pass with autocast
             # Note: Dataloader is responsible for GPU placement (all tensors already on device)
             with self.autocast_ctx:
                 loss = self.system.loss(batch)
@@ -467,8 +492,12 @@ class Trainer:
             loss = loss / self.grad_accum_steps
             loss_accum += loss.detach()
 
-            # Backward
-            loss.backward()
+            # Backward. Under replicated data parallel the gradients cross the network
+            # HERE, bucket by bucket as they become ready; only the last micro-backward
+            # of a step synchronizes. No-op when self.ddp is None (one GPU, or FSDP,
+            # which reduces from inside its own module hooks).
+            with sync_gradients(self.ddp, enabled=(micro_step == self.grad_accum_steps - 1)):
+                loss.backward()
 
         # Clip gradients on the system's raw registered params (shared with the
         # compiled trunk, so backward populated their .grad)

@@ -29,7 +29,7 @@ import torch.nn.functional as F
 from core.model.gpt import GPTConfig, apply_rotary_emb
 
 # reuse the classic block-halves unchanged; only attention gains RoPE
-from gpt2 import gelu, GPT2MLP
+from .gpt2 import gelu, GPT2MLP
 
 
 class GPT2RoPEAttention(nn.Module):

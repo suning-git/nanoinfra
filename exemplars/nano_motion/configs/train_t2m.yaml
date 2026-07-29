@@ -1,0 +1,95 @@
+# train_t2m.yaml — config for the motion orchestrator (train_t2m.py).
+#
+# Composition: mechanism defaults come from core/configs/train_base.yaml
+# (optimizer / scheduler / checkpoint / logging); everything specific to this
+# project lives HERE, next to the orchestrator that assembles it.
+#
+# NOT settable here, on purpose:
+#   vocab_size, n_token_types  — FACTS of the vocabulary assembly. Writing them
+#     down would let the config disagree with the bands, and a band offset that
+#     is wrong by one silently retargets every motion token.
+
+defaults:
+  - train_base
+  - _self_
+
+hydra:
+  searchpath:
+    - pkg://core.configs
+  job:
+    chdir: false
+
+# ----------------------------------------------------------------------------
+# Which data and which codec. `codec_ckpt` wins if set; otherwise the named shelf
+# tokenizer is loaded. Either way the motion band's size is read off the artifact.
+# ----------------------------------------------------------------------------
+source: lafan1
+tokenizer: rot139_kin_fsq2
+codec_ckpt: null
+
+# ----------------------------------------------------------------------------
+# The sequence. 256 codes x 4 frames/code = ~34 seconds of motion at 30fps, minus
+# the caption and the delimiters.
+# ----------------------------------------------------------------------------
+sequence_len: 256
+device_batch_size: 16
+total_batch_size: 4096
+seed: 42
+
+# ----------------------------------------------------------------------------
+# The RECIPE: which tokens go where, and which of them carry loss. A declaration
+# read by the DataSource — not code.
+#
+# `supervise_tags` is ONE TAG PER TEMPLATE SLOT and `supervise` lists the tags that
+# carry loss, so the two lines read as a mask under the template above them. The t2m
+# recipe marks the caption half 0 and the motion half 1: the model is not being taught
+# to write captions, and supervising them would spend capacity doing it.
+# ----------------------------------------------------------------------------
+recipe:
+  t2m:
+    template:       [bos, text_start, text_tokens, text_end, motion_start, motion_tokens, motion_end, eos]
+    supervise_tags: [  0,          0,           0,        0,             1,             1,          1,   1]
+    supervise: [1]
+  motion:
+    template: [bos, motion_start, motion_tokens, motion_end, eos]
+    supervise: all
+
+model:
+  depth: 12
+  dim: 768
+  n_head: 12
+  n_kv_head: ${model.n_head}
+
+max_steps: 20000
+use_compile: true
+
+# "ddp" replicates the model and syncs gradients with NanoDDP; "fsdp" shards, for
+# when the model stops fitting. Ignored on a single GPU.
+parallel: ddp
+
+optimizer:
+  lr_max: 3.0e-4
+  embedding_lr: 3.0e-4
+  unembedding_lr: 3.0e-4
+  weight_decay: 0.1
+  scheduler:
+    warmup_steps: 300
+
+evaluation:
+  interval_steps: 1000
+  n_batches: 20
+  batch: 8
+
+checkpoint:
+  enabled: true
+  save_every: 5000
+  keep_last_n: 2
+  save_dir: "${hydra:runtime.cwd}/exemplars/nano_motion/models/${wandb.name}"
+
+logging:
+  log_every: 100
+
+wandb:
+  enabled: false
+  project: nanoinfra
+  name: "nmo_${source}_d${model.depth}"

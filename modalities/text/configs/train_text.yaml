@@ -4,16 +4,12 @@
 # Composition: mechanism defaults come from core/configs/train_base.yaml
 # (optimizer/scheduler/checkpoint/logging/eval cadence — the knobs of core
 # machinery); everything MODALITY-side (the data sources, model scale) lives
-# HERE with the orchestrator that assembles it. hydra.searchpath makes
-# core.configs addressable; this file is a leaf (entry-point only).
+# HERE with the orchestrator that assembles it. The orchestrator registers
+# core/configs on hydra's search path, so train_base resolves from any config.
 
 defaults:
   - train_base
   - _self_
-
-hydra:
-  searchpath:
-    - pkg://core.configs
 
 # ----------------------------------------------------------------------------
 # Hardware / batch
@@ -47,17 +43,45 @@ model:
 max_steps: -1                   # auto (Chinchilla, target_param_data_ratio) unless overridden
 use_compile: true               # audit: +19-34% tok/s; keep on
 
+# Multi-GPU strategy: "ddp" replicates the model and reduces gradients during
+# backward, "fsdp" shards parameters. Ignored on one GPU. While the model FITS,
+# replicating wins — the bottleneck is activations, not parameters, so sharding
+# costs an all-gather per block and saves nothing. See train_text_1p4b.yaml.
+parallel: fsdp
+
 # ----------------------------------------------------------------------------
 # Data — the text modality's source declaration (FineWeb streaming through
 # TextDataSource; on-the-fly BPE is fully hidden behind compute — audit M2).
 # ----------------------------------------------------------------------------
 data:
   sequence_len: ${sequence_len}
+
+  # Datasets declare their own splits. Nothing is inferred from the directory
+  # listing: `val` is PINNED and `train` is the complement, so downloading more
+  # shards grows train and leaves the ruler untouched (the reverse convention
+  # silently invalidated every historical number). See modalities/text/datasets.py.
+  datasets:
+    fineweb:
+      kind: parquet_text
+      # dir: <defaults to $NANOINFRA_DATA_DIR or <base>/base_data>
+      splits:
+        val:   {files: [shard_005_00000.parquet]}   # a LIST — pin as many as you want
+        train: {rest: true}
+
+  # Recipes are named here and referenced by name from BOTH training sources and
+  # evaluation streams, so the two cannot drift apart unnoticed.
+  recipes:
+    text_pretrain:
+      template: [bos, text_start, text_tokens, text_end, eos]
+      supervise: all
+
   sources:
     - type: text
-      weight: auto              # auto weight from the token budget below
-      tokens: 268435456         # ~268M-token budget (one FineWeb shard worth)
+      dataset: fineweb
       split: train
+      recipe: text_pretrain
+      weight: auto              # auto weight from the token budget below
+      tokens: 268435456         # ~268M-token budget (~0.37 of a 721M-token shard)
       buffer_batch_size: 32
       tokenizer_threads: 4      # audit: 4 vs 16 makes no difference
       tokenizer_batch_size: 128
@@ -72,13 +96,28 @@ optimizer:
   # (train_base defaults 0.2/0.004) each PASSED their audit — keep.
   lr_max: 3.0e-4
 
+# Evaluation is a LIST of declared streams, each naming its dataset/split/recipe.
+# Adding a domain (code, math, …) is one more entry, not a schema change.
 evaluation:
-  text:
-    enabled: true
-    interval_steps: 250         # eval cadence; a full eval also fires at the final step
-    eval_at: null               # optional EXPLICIT schedule (list of steps; overrides
+  enabled: true
+  interval_steps: 250           # eval cadence; a full eval also fires at the final step
+  eval_at: null                 # optional EXPLICIT schedule (list of steps; overrides
                                 #   interval_steps) — e.g. log-spaced for scaling curves
-    eval_tokens: 1048576        # ~1M val tokens per eval
+  eval_tokens: 1048576          # ~1M val tokens per eval (SE ≈ 0.003 nat — plenty)
+  streams:
+    # THE metric: assembled exactly like training. One ruler, and it is this one.
+    - name: text
+      dataset: fineweb
+      split: val
+      recipe: text_pretrain
+      metric: val/text_ce
+      bpb_metric: val/bpb
+    # A stream may also declare `recipe: null` ("assemble nothing" — raw packing).
+    # That is a real capability, not shipped here: the only current user is a
+    # PROJECT-side migration bridge (projects/frontier_arch/scripts/train_mini.py
+    # --raw-ruler) that re-measures the pre-2026-07-26 ruler so historical curves
+    # can be reconnected. A migration artifact belongs to the project doing the
+    # migrating, not to the modality everyone inherits.
 
 checkpoint:
   enabled: false                # flip on (train_base has save_every/save_dir) for real runs

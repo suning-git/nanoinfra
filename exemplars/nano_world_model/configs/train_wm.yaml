@@ -1,0 +1,108 @@
+# train_wm.yaml — config for the video world-model orchestrator (train_wm.py).
+#
+# Composition: mechanism defaults come from core/configs/train_base.yaml
+# (optimizer / scheduler / checkpoint / logging / profiling — the knobs of core
+# machinery); everything specific to this project lives HERE, next to the
+# orchestrator that assembles it.
+#
+# NOT settable here, on purpose:
+#   sequence_len, total_batch_size  — DERIVED at assembly time from the clip
+#     geometry (the model processes [clean | noisy], i.e. 2 x row length). Writing
+#     them down would let the config disagree with the row layout.
+#   vocab_size, n_token_types       — facts of the vocab assembly, same reason.
+
+defaults:
+  - train_base
+  - _self_
+
+hydra:
+  searchpath:
+    - pkg://core.configs
+
+# ----------------------------------------------------------------------------
+# The clip. Changing this changes the row, the model's sequence length, and which
+# cache is read — build_cache.py must have been run for the same geometry.
+# ----------------------------------------------------------------------------
+# Which world model. Both train over the SAME rows, the same data and the same trunk;
+# they differ only in `loss()`. "diffusion" predicts a masked block bidirectionally
+# (cheap training, several forwards per generated frame); "ar" predicts the next token
+# causally (one forward per TOKEN to generate, which is what the KV cache and CUDA
+# graphs in inference/ make fast).
+objective: diffusion
+
+clip:
+  frames: 17                    # game frames per clip -> 5 latent frames (4 predicted)
+  res: 128                      # square, 128px
+
+# ----------------------------------------------------------------------------
+# Hardware / batch. `total_batch_rows` is in ROWS (clips), not tokens: a row is
+# the natural unit here, and the token count follows from the geometry.
+# grad_accum = total_batch_rows / (device_batch_size * world_size).
+# ----------------------------------------------------------------------------
+device_batch_size: 4
+total_batch_rows: 4
+
+# "ddp" replicates the model and syncs gradients with NanoDDP (measured best here:
+# 106k vs 94k tok/s and 19GB vs 30GB against FSDP on 2x5090 — this model fits, so
+# the bottleneck is activations, not parameters). "fsdp" shards, for when it stops
+# fitting. Ignored on a single GPU.
+parallel: ddp
+
+# ----------------------------------------------------------------------------
+# Model — trunk geometry only.
+# ----------------------------------------------------------------------------
+model:
+  depth: 12
+  dim: 768
+  n_head: 12
+  n_kv_head: ${model.n_head}
+
+max_steps: 200000
+use_compile: true               # per-block (see train_wm.compile_per_block)
+
+# ----------------------------------------------------------------------------
+# The masked-diffusion noise schedule. t is clipped away from 0: the MDLM 1/t
+# weight has unbounded gradient variance as t -> 0 (BD3-LM).
+# ----------------------------------------------------------------------------
+diffusion:
+  t_min: 0.2
+  t_max: 1.0
+
+# ----------------------------------------------------------------------------
+# Evaluation — NELBO on frozen val rows at a fixed grid of noise levels.
+# A fixed set of rows at a fixed grid of noise levels: the ruler must not move
+# between runs, or a comparison measures the ruler.
+# ----------------------------------------------------------------------------
+evaluation:
+  val_rows: 500
+  t_grid: [0.3, 0.5, 0.7, 0.9]
+  batch: 4
+  interval_steps: 1000
+
+optimizer:
+  # ONE learning rate for every parameter group. core's train_base defaults use
+  # role-based multi-LR (embedding_lr 0.2, unembedding_lr 0.004) tuned on text; on
+  # this model they are clearly WORSE — measured head to head over 10k steps, val
+  # NELBO 9.336 vs 8.999 (see RESULTS.md). Plausibly because the video band is 64000
+  # codes that each appear rarely, so a 0.2 LR on the embedding is far too hot.
+  # Setting all three equal makes core's build_optimizers reduce to plain AdamW.
+  lr_max: 3.0e-4
+  embedding_lr: 3.0e-4
+  unembedding_lr: 3.0e-4
+  weight_decay: 0.1
+  scheduler:
+    warmup_steps: 300
+
+checkpoint:
+  enabled: true
+  save_every: 5000
+  keep_last_n: 2
+  save_dir: "${hydra:runtime.cwd}/exemplars/nano_world_model/models/${wandb.name}"
+
+logging:
+  log_every: 100
+
+wandb:
+  enabled: false
+  project: nanoinfra
+  name: "nwm_${clip.frames}f_d${model.depth}"
