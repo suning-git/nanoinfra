@@ -25,6 +25,7 @@ such a System's checkpoints stay interchangeable with any other over the same tr
 
 import os
 import time
+import warnings
 
 try:
     import wandb
@@ -54,22 +55,39 @@ def detect_gpu_type() -> tuple[str, float]:
 
     Returns:
         tuple: (gpu_name, promised_flops)
-            - gpu_name: str - 'H100' or 'H20'
+            - gpu_name: str - detected GPU model
             - promised_flops: float - TFLOPS in bf16 precision
 
-    Raises:
-        ValueError: If GPU type is not supported (not H100 or H20)
+        Unknown GPUs return NaN for promised_flops so MFU is unavailable while
+        training continues normally.
 
-    Supported GPUs:
+    Supported BF16 GPUs:
         - H100 SXM5: 989 TFLOPS (bf16)
         - H20: 296 TFLOPS (bf16)
+        - A100: 312 TFLOPS (bf16, dense)
+        - RTX A6000: 155 TFLOPS (bf16, dense)
+        - RTX 4060 Ti: 88 TFLOPS (bf16, dense)
+        - RTX 4090: 330 TFLOPS (bf16, dense)
+        - RTX 5090: 209.5 TFLOPS (bf16, dense)
+
+    RTX 2080 Ti and RTX 8000 are recognized, but their Turing Tensor Cores do
+    not support BF16, so MFU is unavailable for this Trainer's BF16 path.
     """
-    gpu_device_name = torch.cuda.get_device_name(0).upper()
+    gpu_device_name = torch.cuda.get_device_name(0)
+    normalized_name = gpu_device_name.upper()
 
     # GPU performance specs (bf16 TFLOPS)
     gpu_specs = {
         'H100': 989e12,  # H100 SXM5 80GB
         'H20': 296e12,   # H20
+        'A100': 312e12,
+        'RTX A6000': 155e12,
+        'RTX 4060 Ti': 88e12,
+        'RTX 4090': 330e12,
+        # Turing Tensor Cores have no BF16 path. Keep these models explicit so
+        # they are distinguished from genuinely unknown future GPUs.
+        'RTX 2080 Ti': None,
+        'RTX 8000': None,
         # Consumer Blackwell (local dev / first-step verification box). bf16 dense
         # tensor throughput, no sparsity; consumer FP32-accumulate may run lower, so
         # MFU computed against this is approximate. Affects the MFU metric only, not
@@ -79,16 +97,27 @@ def detect_gpu_type() -> tuple[str, float]:
 
     # Detect GPU type
     for gpu_name, flops in gpu_specs.items():
-        if gpu_name in gpu_device_name:
+        if gpu_name.upper() in normalized_name:
+            if flops is None:
+                warnings.warn(
+                    f"{gpu_device_name} does not support BF16 Tensor Core "
+                    "operations. MFU will be unavailable for the Trainer's "
+                    "BF16 path.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return gpu_name, float('nan')
             return gpu_name, flops
 
-    # Unsupported GPU - raise error
+    # MFU is optional telemetry and must not prevent training on a new GPU.
     supported_gpus = ', '.join(gpu_specs.keys())
-    raise ValueError(
-        f"Unsupported GPU type: {gpu_device_name}\n"
-        f"Currently supported GPUs: {supported_gpus}\n"
-        f"Please add your GPU type to detect_gpu_type() in trainer.py"
+    warnings.warn(
+        f"Unknown GPU type: {gpu_device_name}. MFU will be unavailable; "
+        f"known GPU types: {supported_gpus}",
+        RuntimeWarning,
+        stacklevel=2,
     )
+    return gpu_device_name, float('nan')
 
 
 class Trainer:
