@@ -199,14 +199,12 @@ generation-seed invariance, open-vocabulary reliability, real-robot deployment,
 a universal 10% reduction in foot sliding or jerk, or an exact reproduction of
 every upstream paper result.
 
-## Qualitative evidence
+## Qualitative demo
 
-Side-by-side videos for forward walking, left turn, and right turn remain in the
-external evidence bundle and are not redistributed in this public fork. The
-left/blue skeleton is the OMG reference and the right/orange skeleton is the
-closed-loop G1 rollout from the preferred clean-start seed-0 policy. They are
-qualitative illustrations only; the tables above remain the evidence used for
-acceptance decisions.
+Three side-by-side videos are included under [`assets/demo/`](assets/demo/):
+forward walking, left turn, and right turn. The left/blue skeleton is the OMG
+reference and the right/orange skeleton is the closed-loop G1 rollout from the
+preferred clean-start seed-0 policy.
 
 ## Quick verification
 

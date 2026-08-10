@@ -15,6 +15,7 @@ This project follows the NanoInfra convention: project source lives under
   short-reference loader override;
 - the long-horizon planar seam, adapter-sanitization, three-tracker evaluation,
   and held-out domain-adaptation negative result;
+- three compact skeleton demo videos and their poster images;
 - compact JSON summaries under `results/`.
 
 ## Exclude
@@ -22,7 +23,7 @@ This project follows the NanoInfra convention: project source lives under
 - `datasets/`, `models/`, and `outputs/`;
 - BONES-SEED BVH files and all derived reference shards;
 - OMG and tracker checkpoints;
-- all MP4/WebM renders, poster images, and raw episode logs;
+- all other MP4/WebM renders and raw episode logs;
 - AutoDL credentials, SSH material, fleet registries, raw provider logs, and
   machine-specific task state;
 - abandoned residual/oracle experiments and one-off remote queue wrappers from
@@ -43,7 +44,6 @@ project directory plus the repository-root README discovery link; edits under
 all.
 
 The exact allow-list is [`submission_files.txt`](submission_files.txt). It omits
-all rendered media, the abandoned residual/oracle experiments, and
-machine-specific training wrappers that remain in the working directory for
-research history. Use this allow-list instead of staging the whole untracked
-project directory.
+the abandoned residual/oracle experiments and machine-specific training wrappers
+that remain in the working directory for research history. Use this allow-list
+instead of staging the whole untracked project directory.

@@ -27,13 +27,17 @@ the same order. The adapter therefore does **not** retarget through SMPL. It:
 5. obtains left/right foot body positions from the target G1 MJCF;
 6. writes the original `shard_*.npz` object-array reference format.
 
-## Visual evidence boundary
+## Visual demo
 
-Side-by-side renders from the preferred clean-start seed-0 checkpoint are kept
-in the external evidence bundle until redistribution terms for the generated
-artifacts are confirmed. The blue skeleton is the OMG target and the orange
-skeleton is the closed-loop G1 tracker rollout. The videos are only a visual aid;
-the quantitative claims come from the fixed episode protocol in
+The repository includes three side-by-side renders from the preferred
+clean-start seed-0 checkpoint. The blue skeleton is the OMG target and the orange
+skeleton is the closed-loop G1 tracker rollout. Click a poster to open the video:
+
+| Walk forward | Turn left | Turn right |
+|---|---|---|
+| [![Walk forward](assets/demo/walk-forward.png)](assets/demo/walk-forward.mp4) | [![Turn left](assets/demo/turn-left.png)](assets/demo/turn-left.mp4) | [![Turn right](assets/demo/turn-right.png)](assets/demo/turn-right.mp4) |
+
+The quantitative claims come from the fixed episode protocol in
 [`RESULTS.md`](RESULTS.md).
 
 ## Local format test

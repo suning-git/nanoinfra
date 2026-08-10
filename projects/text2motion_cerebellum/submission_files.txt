@@ -5,6 +5,12 @@ projects/text2motion_cerebellum/README.md
 projects/text2motion_cerebellum/RESULTS.md
 projects/text2motion_cerebellum/SUBMISSION.md
 projects/text2motion_cerebellum/__init__.py
+projects/text2motion_cerebellum/assets/demo/turn-left.mp4
+projects/text2motion_cerebellum/assets/demo/turn-left.png
+projects/text2motion_cerebellum/assets/demo/turn-right.mp4
+projects/text2motion_cerebellum/assets/demo/turn-right.png
+projects/text2motion_cerebellum/assets/demo/walk-forward.mp4
+projects/text2motion_cerebellum/assets/demo/walk-forward.png
 projects/text2motion_cerebellum/evaluate_min_ref_frames.patch
 projects/text2motion_cerebellum/expanded_prompt_experiment.py
 projects/text2motion_cerebellum/expanded_prompt_review.py

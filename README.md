@@ -102,8 +102,8 @@ The Text2Motion → Motion Cerebellum project uses the
 controller and a pretrained OMG text-to-motion generator. Training data includes
 Motion Data by [Bones Studio](https://bones.studio/). Use of the underlying
 dataset is subject to the BONES Motion Capture Dataset License Agreement; raw
-data, checkpoints, derived reference shards, and rendered videos are not
-redistributed.
+data, checkpoints, and derived reference shards are not redistributed. Three
+compact skeleton comparison videos are included with the project demo.
 
 ## License
 

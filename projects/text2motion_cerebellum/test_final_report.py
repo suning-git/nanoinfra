@@ -336,7 +336,19 @@ def test_submission_allow_list_is_complete_and_scoped() -> None:
     assert "README.md" in entries
     assert "projects/text2motion_cerebellum/results/main_results.json" in entries
     assert not any(path.startswith("remote/") or path.startswith("outputs/") for path in entries)
-    assert not any(Path(path).suffix.lower() in {".mp4", ".webm", ".png"} for path in entries)
+    media = {
+        path
+        for path in entries
+        if Path(path).suffix.lower() in {".mp4", ".webm", ".png"}
+    }
+    assert media == {
+        "projects/text2motion_cerebellum/assets/demo/turn-left.mp4",
+        "projects/text2motion_cerebellum/assets/demo/turn-left.png",
+        "projects/text2motion_cerebellum/assets/demo/turn-right.mp4",
+        "projects/text2motion_cerebellum/assets/demo/turn-right.png",
+        "projects/text2motion_cerebellum/assets/demo/walk-forward.mp4",
+        "projects/text2motion_cerebellum/assets/demo/walk-forward.png",
+    }
 
 
 def load_tests(loader, tests, pattern):  # noqa: ARG001

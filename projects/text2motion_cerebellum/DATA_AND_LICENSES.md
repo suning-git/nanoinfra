@@ -1,8 +1,9 @@
 # Data, models, and licenses
 
-Source code, reports, preregistered prompt definitions, and compact aggregate
-results belong in this repository. Raw captures, derived reference shards,
-checkpoints, episode logs, and rendered media remain external.
+Source code, reports, preregistered prompt definitions, compact aggregate
+results, and three skeleton demo videos belong in this repository. Raw captures,
+derived reference shards, checkpoints, episode logs, and full render sets remain
+external.
 
 ## External components
 
@@ -20,11 +21,9 @@ those components and complying with their terms.
 
 ## Qualitative renders
 
-Forward-walk, left-turn, and right-turn comparisons remain in the external
-evidence bundle. They show projected skeleton coordinates—the OMG reference
-beside the simulated G1 rollout—but are not redistributed in this public fork
-until the relevant output terms are confirmed. They are not used to compute the
-reported metrics.
+`assets/demo/` contains forward-walk, left-turn, and right-turn comparisons. They
+show projected skeleton coordinates: the OMG reference beside the simulated G1
+rollout. They are not used to compute the reported metrics.
 
 ## External artifact contract
 
