@@ -376,7 +376,7 @@ uniform sampling 重启后，750、1000、1028 clip smoke 均通过。该修复�
   `projects/text2motion_cerebellum/results/short_horizon_results.json`
 - 长动作修复、三小脑闭环与域适配负面结果：
   `projects/text2motion_cerebellum/results/long_horizon_results.json`
-- 外部数据、checkpoint、episode 级数据与视频的边界和哈希：
+- 外部数据、checkpoint、episode 级数据与视频的提交边界：
   `projects/text2motion_cerebellum/DATA_AND_LICENSES.md`
 - 完整 episode 数据、冻结 manifest 和展示视频保留在 Git 忽略的
   `outputs/remote_text2motion_mainline/` 下，不随仓库提交。

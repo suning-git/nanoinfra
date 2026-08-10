@@ -174,8 +174,8 @@ error (`Eg_mpjpe`) rose from 102.56 mm to 113.68 mm, but joint-relative MPJPE,
 completion, and success all improved.
 
 This checkpoint replaced the 500-clip policy for this intermediate demo. The
-checkpoint remains external to Git; the final submitted policy set and hashes are
-documented in `DATA_AND_LICENSES.md`.
+checkpoint remains external to Git; the submission boundary is documented in
+`DATA_AND_LICENSES.md`.
 
 The preferred checkpoint has also been re-rendered as three side-by-side demo
 videos. Full structured results are in

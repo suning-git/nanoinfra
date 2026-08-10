@@ -34,9 +34,10 @@ The frozen experiment used:
 - two native held-out reference shards;
 - three original OMG prompt reference shards.
 
-The policy files remain outside the source repository. If they are released,
-they should be versioned in a separate model repository and referenced by model
-repository revision.
+The policy files are not distributed as part of this project submission. The
+checked-in aggregate results and skeleton-only demo videos are sufficient to
+review the submitted project; rerunning checkpoint-dependent evaluation requires
+separately obtained external artifacts.
 
 The complete local evidence bundle remains under the ignored `outputs/` root.
 The checked-in result JSON files record source-artifact provenance so a
