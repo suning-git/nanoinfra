@@ -1,0 +1,45 @@
+{
+  "schema": "text2motion-reference-repair-protocol-v2",
+  "phase": "post_hoc_followup_after_v1",
+  "source_prompt_protocol": "projects/text2motion_cerebellum/expanded_prompts_v1.json",
+  "selection_rule": "reuse the same nine frozen generated motions; no regeneration, rerolls, or prompt-specific tuning",
+  "target_fps": 50.0,
+  "repair_only_rejected_references": true,
+  "discontinuity_inpaint": {
+    "enabled_for_gate_reason": "continuity",
+    "detection_threshold_rad": 0.5,
+    "half_window_frames": 12,
+    "interpolation": "smoothstep"
+  },
+  "foot_lock": {
+    "enabled_for_gate_reason": "foot_slide",
+    "contact_tolerance_m": 0.02,
+    "gain": 1.0
+  },
+  "time_stretch": {
+    "target_root_speed_m_s": 1.8,
+    "target_joint_speed_rad_s": 13.5,
+    "target_joint_step_rad_frame": 0.45,
+    "maximum_scale": 2.0,
+    "passes": 2
+  },
+  "smoothing": {
+    "linear_channels": "29 joint angles only",
+    "include_root_translation": false,
+    "triangular_half_width_frames": 4,
+    "passes": 1
+  },
+  "evaluation": {
+    "training_seeds": [0, 1, 2],
+    "observation_noise": true,
+    "repeats": 4,
+    "reuse_original_three_prompt_references": true
+  },
+  "acceptance": {
+    "minimum_new_quality_passed": 6,
+    "preserve_original_three_references": true,
+    "minimum_per_seed_tracking_success": 0.75,
+    "minimum_per_seed_completion": 0.9,
+    "must_improve_mean_end_to_end_success": true
+  }
+}

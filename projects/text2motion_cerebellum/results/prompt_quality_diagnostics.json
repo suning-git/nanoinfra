@@ -1,0 +1,24 @@
+{
+  "schema": "text2motion-cerebellum-quality-diagnostics-v1",
+  "provenance": {
+    "source_artifact": "outputs/remote_text2motion_mainline/prompt_quality_diagnostic_v1/quality_diagnostics.json",
+    "source_sha256": "8cd44d4b35f39b4812aa743aec539a8aaab04a263e4b4209b9ca3a7c1b007d0e"
+  },
+  "new_prompt_count": 9,
+  "passed": 3,
+  "rejected": 6,
+  "reason_counts": {
+    "continuity": 2,
+    "foot_slide": 1,
+    "joint_vel": 1,
+    "speed": 2
+  },
+  "rejections": [
+    {"tag": "walk_backward", "reason": "foot_slide"},
+    {"tag": "sidestep_left", "reason": "speed", "root_speed_max_m_s": 2.0562572479248047},
+    {"tag": "jog_forward", "reason": "speed", "root_speed_max_m_s": 6.1333112716674805},
+    {"tag": "squat", "reason": "joint_vel", "joint_speed_max_rad_s": 15.689603805541992},
+    {"tag": "raise_both_arms", "reason": "continuity", "joint_step_max_rad_frame": 1.697904109954834},
+    {"tag": "kick_right_leg", "reason": "continuity", "joint_step_max_rad_frame": 1.1567388772964478}
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "schema": "text2motion-cerebellum-expanded-prompt-results-v1",
+  "provenance": {
+    "source_artifact": "outputs/remote_text2motion_mainline/expanded_prompts_v1/summary.json",
+    "source_sha256": "0a7ba719930651832f2fc1b17c75d81ea305faf31ed9be507e7b4a86b568d515"
+  },
+  "protocol": {
+    "total_preregistered_prompts": 12,
+    "new_generation_prompts": 9,
+    "generation_attempts_per_new_prompt": 1,
+    "evaluation_repeats": 4,
+    "training_seeds": [0, 1, 2],
+    "selection_rule": "no rerolls; every preregistered prompt is reported",
+    "thresholds": {
+      "minimum_new_quality_pass_rate": 0.6666666666666666,
+      "minimum_per_seed_tracking_success": 0.75,
+      "minimum_per_seed_completion": 0.9,
+      "minimum_per_seed_end_to_end_success": 0.6
+    }
+  },
+  "generation": {
+    "new_quality_passed": 3,
+    "new_quality_total": 9,
+    "new_quality_pass_rate": 0.3333333333333333,
+    "quality_passing_tags": [
+      "walk_forward",
+      "walk_turn_left",
+      "walk_turn_right",
+      "sidestep_right",
+      "bow",
+      "wave_right_hand"
+    ],
+    "quality_rejected_tags": [
+      "walk_backward",
+      "sidestep_left",
+      "jog_forward",
+      "squat",
+      "raise_both_arms",
+      "kick_right_leg"
+    ]
+  },
+  "per_seed": [
+    {
+      "training_seed": 0,
+      "tracking_success": 0.8333333333333334,
+      "tracking_completion": 0.9059343434343434,
+      "end_to_end_success_over_all_prompts": 0.4166666666666667
+    },
+    {
+      "training_seed": 1,
+      "tracking_success": 0.7916666666666666,
+      "tracking_completion": 0.915614478114478,
+      "end_to_end_success_over_all_prompts": 0.3958333333333333
+    },
+    {
+      "training_seed": 2,
+      "tracking_success": 0.8333333333333334,
+      "tracking_completion": 0.9577020202020202,
+      "end_to_end_success_over_all_prompts": 0.4166666666666667
+    }
+  ],
+  "across_training_seeds": {
+    "tracking_success": {"mean": 0.8194444444444445, "sample_std": 0.02405626121623445},
+    "tracking_completion": {"mean": 0.9264169472502806, "sample_std": 0.027522592429731988},
+    "end_to_end_success": {"mean": 0.40972222222222227, "sample_std": 0.012028130608117225}
+  },
+  "decision": {
+    "new_prompt_quality_gate_credible": false,
+    "all_seeds_track_quality_passing_prompts": true,
+    "all_seeds_end_to_end_credible": false,
+    "expanded_demo_credible": false
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "schema": "text2motion-long-horizon-sanitizer-protocol-v1",
+  "classification": "post_hoc_adapter_sanitization_followup",
+  "source_experiment": "long_horizon_space_seam_v1",
+  "source_variant": "se2_c1_decay_15",
+  "generation_seeds": [0, 1, 2],
+  "selection_rule": "evaluate all 27 frozen prompt/seed cells once; preserve every source-passing cell byte-for-trajectory after rate conversion; apply at most two reason-specific passes to rejected cells; never repair or time-stretch speed failures",
+  "rerolls": 0,
+  "prompt_specific_tuning": false,
+  "target_fps": 50.0,
+  "maximum_repair_passes": 2,
+  "repairs": {
+    "continuity_or_joint_vel": {
+      "operation": "joint_discontinuity_inpaint",
+      "detection_threshold_rad_frame": 0.3,
+      "half_window_frames": 12
+    },
+    "foot_slide": {
+      "operation": "contact_root_xy_lock",
+      "contact_tolerance_m": 0.02,
+      "gain": 1.0
+    },
+    "hover": {
+      "operation": "global_ground_alignment",
+      "sole_height_percentile": 2
+    },
+    "speed": {
+      "operation": "none",
+      "reason": "root-speed repair requires time scaling or generator changes and is outside adapter sanitization"
+    }
+  },
+  "acceptance": {
+    "minimum_quality_passed": 18,
+    "total": 27,
+    "minimum_per_generation_seed_quality_passed": 6,
+    "preserve_every_source_passing_cell": true
+  }
+}

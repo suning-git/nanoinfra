@@ -1,0 +1,83 @@
+{
+  "schema": "text2motion-cerebellum-reference-repair-results-v1",
+  "phase": "post_hoc_followup_after_preregistered_stress_test",
+  "provenance": {
+    "v1_comparison": {
+      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v1/comparison.json",
+      "source_sha256": "5e67a8c81a058375d5dd946432d4874f8eb2babbb87c8cfa14a0efcd035ffaf2"
+    },
+    "v1_summary": {
+      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v1/summary.json",
+      "source_sha256": "974333f6bf1a7e2be64c626546b3e400736838750fa4ddf532ba104b3612e257"
+    },
+    "v2_comparison": {
+      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v2/comparison.json",
+      "source_sha256": "ba68285151dc86d8cddbfb13db4049f8640b6f48f22b9e6b2bf09d8253f622bc"
+    },
+    "v2_summary": {
+      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v2/summary.json",
+      "source_sha256": "c151c284a3ed0035ebfe6df6e6aaf5a6bdade8792ddf36e4924a37d37a182968"
+    }
+  },
+  "protocol_invariants": {
+    "frozen_new_motions": 9,
+    "generation_rerolls": 0,
+    "prompt_specific_tuning": false,
+    "preserved_original_references": 3,
+    "training_seeds": [0, 1, 2],
+    "observation_noise": true,
+    "evaluation_repeats": 4
+  },
+  "original_stress_test": {
+    "new_quality_passed": 3,
+    "new_quality_total": 9,
+    "tracking_success_on_quality_passing_references": 0.8194444444444445,
+    "end_to_end_success_over_all_preregistered_prompts": 0.40972222222222227
+  },
+  "repair_v1": {
+    "method": "contact root lock, uniform time stretch capped at 5x, then triangular smoothing",
+    "new_quality_passed": 6,
+    "new_quality_total": 9,
+    "tracking_success_on_quality_passing_references": 0.7314814814814815,
+    "tracking_completion": 0.8812962786495282,
+    "end_to_end_success_over_all_preregistered_prompts": 0.5486111111111112,
+    "Empjpe_mm": 42.79172362681357,
+    "foot_slide": 5.689616131173808,
+    "jerk": 4.993472892666946,
+    "per_seed": [
+      {"training_seed": 0, "tracking_success": 0.6944444444444444, "completion": 0.8814618273934312, "end_to_end_success": 0.5208333333333334},
+      {"training_seed": 1, "tracking_success": 0.75, "completion": 0.8783170409546196, "end_to_end_success": 0.5625},
+      {"training_seed": 2, "tracking_success": 0.75, "completion": 0.8841099676005336, "end_to_end_success": 0.5625}
+    ],
+    "acceptance_passed": false
+  },
+  "repair_v2": {
+    "method": "local joint-discontinuity inpainting, time stretch capped at 2x, and joint-only triangular smoothing",
+    "new_quality_passed": 6,
+    "new_quality_total": 9,
+    "tracking_success_on_quality_passing_references": 0.7592592592592592,
+    "tracking_completion": 0.8813230149002407,
+    "end_to_end_success_over_all_preregistered_prompts": 0.5694444444444444,
+    "Empjpe_mm": 45.44813145742231,
+    "foot_slide": 6.07181899625651,
+    "jerk": 5.163196544368405,
+    "per_seed": [
+      {"training_seed": 0, "tracking_success": 0.75, "completion": 0.8847490168403432, "end_to_end_success": 0.5625},
+      {"training_seed": 1, "tracking_success": 0.7222222222222222, "completion": 0.8538948462194076, "end_to_end_success": 0.5416666666666666},
+      {"training_seed": 2, "tracking_success": 0.8055555555555556, "completion": 0.9053251816409712, "end_to_end_success": 0.6041666666666666}
+    ],
+    "continuity_prompt_tracking_success": {
+      "raise_both_arms": [0.75, 0.5, 1.0],
+      "kick_right_leg": [0.0, 0.0, 0.0]
+    },
+    "acceptance": {
+      "minimum_new_quality_passed": true,
+      "mean_end_to_end_improved_over_original": true,
+      "no_regeneration_or_rerolls": true,
+      "original_three_preserved": true,
+      "all_seeds_tracking_and_completion_floor": false
+    },
+    "acceptance_passed": false
+  },
+  "decision": "repair improves gate coverage and mean end-to-end success, but does not establish a credible expanded demo because the all-seed tracking/completion floor still fails"
+}

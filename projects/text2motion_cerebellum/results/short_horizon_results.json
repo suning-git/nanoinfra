@@ -1,0 +1,169 @@
+{
+  "schema": "text2motion-short-horizon-results-v1",
+  "classification": "post_hoc_short_horizon_followup",
+  "generation_protocol": {
+    "model": "OMG 50M ONNX",
+    "omg_commit": "61e196010b332acbace223b2c449e25f454ea0a3",
+    "prompt_tags": 9,
+    "generation_seeds": [
+      0,
+      1,
+      2
+    ],
+    "attempts_per_prompt_seed_variant": 1,
+    "rerolls": 0
+  },
+  "continuation_preflight": {
+    "provenance": {
+      "source_artifact": "outputs/remote_text2motion_mainline/continuation_preflight_v2/result.json",
+      "source_sha256": "89a993ffce5be109c944d846b4aaccd16b7474d7d787bcf1df60e2c463cc80ae"
+    },
+    "scope": "jog, both-arms raise, and right-leg kick; generation seeds 0, 1, and 2",
+    "baseline_quality_passed": 0,
+    "baseline_total": 9,
+    "candidates": {
+      "continuation_overlap1_full": {
+        "quality_passed": 0,
+        "total": 9,
+        "seam_is_worst_transition_count": 5,
+        "seam_worst_step_mean_rad_frame": 1.265228235721588
+      },
+      "continuation_overlap10_last10": {
+        "quality_passed": 0,
+        "total": 9,
+        "seam_is_worst_transition_count": 7,
+        "seam_worst_step_mean_rad_frame": 1.3195975124835968
+      },
+      "continuation_overlap10_full": {
+        "quality_passed": 0,
+        "total": 9,
+        "seam_is_worst_transition_count": 7,
+        "seam_worst_step_mean_rad_frame": 0.9629054197243282
+      }
+    },
+    "conclusion": "the existing diffusion continuation mechanism reduces some seam magnitudes but does not make the three difficult long motions pass the quality gate"
+  },
+  "single_vs_double_multiseed": {
+    "provenance": {
+      "source_artifact": "outputs/remote_text2motion_mainline/single_vs_double_multiseed_v1/result.json",
+      "source_sha256": "1817fca5d1a24b61ff398b1d917320254a241b6c5d97da7a788ee845ce9a3efe"
+    },
+    "single_60": {
+      "quality_passed": 21,
+      "total": 27,
+      "quality_pass_rate": 0.7777777777777778,
+      "seam_is_worst_transition_count": 0
+    },
+    "baseline_two_chunks": {
+      "quality_passed": 9,
+      "total": 27,
+      "quality_pass_rate": 0.3333333333333333,
+      "seam_is_worst_transition_count": 22
+    },
+    "paired_cells": {
+      "both_pass": 9,
+      "single_only_pass": 12,
+      "double_only_pass": 0,
+      "both_fail": 6
+    },
+    "single_rejections": {
+      "hover": 1,
+      "joint_vel": 1,
+      "speed": 4
+    }
+  },
+  "closed_loop_tracking": {
+    "selection_rule": "track all 21 quality-passing single-60 cells; count the other six as end-to-end failures",
+    "minimum_reference_frames_override": {
+      "default": 100,
+      "experiment": 2,
+      "reason": "60 frames at 30 Hz become 99 frames at the official 50 Hz clock; the override changes only loader filtering"
+    },
+    "provenance": {
+      "inventory": {
+        "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/inventory.json",
+        "source_sha256": "bb83c9c09ff6c7c27eeaf11f448b40d582f27f46f009b245fb868d84603b4eec"
+      },
+      "summary": {
+        "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/summary.json",
+        "source_sha256": "176f6dc82ae7264633265f526465c0d1cb5b300e07f357708fe74c88d8d84b11"
+      },
+      "episode_files": [
+        {
+          "training_seed": 0,
+          "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/seed0_episodes.json",
+          "source_sha256": "228b05185e673c41db61bea93caa2507498dca63dd7235f0cc47fff03f9b8fd1"
+        },
+        {
+          "training_seed": 1,
+          "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/seed1_episodes.json",
+          "source_sha256": "5acf15c68d1f55fce02489e70bbff4fdfe21548cd77aca742d30837a193ac884"
+        },
+        {
+          "training_seed": 2,
+          "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/seed2_episodes.json",
+          "source_sha256": "f09701b66fb4e47741f596a93a24e2a5aa98346936cbcbcef81deda5ce9006e2"
+        }
+      ]
+    },
+    "episodes_per_training_seed": 84,
+    "per_training_seed": [
+      {
+        "training_seed": 0,
+        "tracking_success": 0.8214285714285714,
+        "completion": 0.9461856171039845,
+        "end_to_end_success": 0.6388888888888888
+      },
+      {
+        "training_seed": 1,
+        "tracking_success": 0.8095238095238095,
+        "completion": 0.9455782312925171,
+        "end_to_end_success": 0.6296296296296297
+      },
+      {
+        "training_seed": 2,
+        "tracking_success": 0.7857142857142857,
+        "completion": 0.9374392614188533,
+        "end_to_end_success": 0.6111111111111112
+      }
+    ],
+    "across_training_seeds": {
+      "tracking_success": {
+        "mean": 0.8055555555555555,
+        "sample_std": 0.018184824186332695
+      },
+      "completion": {
+        "mean": 0.9430677032717849,
+        "sample_std": 0.004883825104348828
+      },
+      "end_to_end_success": {
+        "mean": 0.6265432098765432,
+        "sample_std": 0.014143752144925385
+      }
+    },
+    "by_prompt_tracking_success": {
+      "bow": 1.0,
+      "jog_forward": 1.0,
+      "kick_right_leg": 0.125,
+      "raise_both_arms": 1.0,
+      "sidestep_left": 0.4583333333333333,
+      "sidestep_right": 0.5,
+      "squat": 0.875,
+      "walk_backward": 1.0,
+      "wave_right_hand": 1.0
+    },
+    "decision": {
+      "quality_floor_passed": true,
+      "all_trackers_passed": true,
+      "all_overall_end_to_end_floors_passed": true,
+      "short_horizon_demo_credible_under_overall_protocol": true,
+      "robust_to_generation_seed": false,
+      "long_horizon_demo_credible": false
+    }
+  },
+  "next_action": {
+    "text_to_motion": "replace or fine-tune the long-horizon generator with explicit transition and velocity continuity objectives",
+    "motion_cerebellum": "retain the general tracker, but target kick and lateral-motion references if those actions are required",
+    "claim_boundary": "the new result establishes a short-horizon, multi-generation-seed demo; it does not repair OMG long-context generation"
+  }
+}
