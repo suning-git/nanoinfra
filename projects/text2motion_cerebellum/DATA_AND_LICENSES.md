@@ -34,16 +34,12 @@ The frozen experiment used:
 - two native held-out reference shards;
 - three original OMG prompt reference shards.
 
-The policy SHA-256 digests are:
-
-| Training seed | SHA-256 |
-|---:|---|
-| 0 | `4eda8acc65c98f3939d97886fdc02ed21e623b0abc79b4556cae66852df245d2` |
-| 1 | `6a1257bb239cabc229db847d50a5be3f75782d94d83a4b877612dc236e13ffc5` |
-| 2 | `f43388f2b7b57f4a9a88c037161b2165604d16f27c5b59cd05575ee886fc24c7` |
+The policy files remain outside the source repository. If they are released,
+they should be versioned in a separate model repository and referenced by model
+repository revision.
 
 The complete local evidence bundle remains under the ignored `outputs/` root.
-The checked-in result JSON files record the source artifact path and SHA-256 so a
+The checked-in result JSON files record source-artifact provenance so a
 maintainer with that bundle can confirm that the compact summaries came from the
 frozen evidence.
 

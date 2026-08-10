@@ -71,7 +71,7 @@ OMG 参考动作在同一评测协议下的表现。
 
 BONES-SEED 原始动作经过 SOMA→SMPL/G1 的既有处理链和项目质量门，得到 1694 条可用训练
 参考。本实验对每个训练种子使用其中 1500 条；原生评测固定使用由 test-pool seed 12345
-确定的 60 条 held-out 动作。训练与测试 reference shard 的最终 SHA-256 清单由
+确定的 60 条 held-out 动作。训练与测试 reference shard 的最终冻结清单由
 `final_freeze_v1/remote_artifact_manifest.json` 固定。
 
 数据拆分和评测只能被解释为本项目的 held-out 协议。虽然源数据采用 actor-level 拆分思路，
@@ -202,7 +202,7 @@ baseline 更强，不能把改善单独归因于某一项改动。三种子表�
 却在 tracker 中失败最多，进一步证明生成质量和闭环可跟踪性是两个不同的失败层级。
 
 远端任务在 72 个 episode 全部写入后因汇总脚本的直接执行 import path 出错而标记失败。
-输入文件已逐一 SHA-256 固定；修复导入后在本地重建 summary，未重跑生成或物理评测。
+输入文件已由冻结清单固定；修复导入后在本地重建 summary，未重跑生成或物理评测。
 
 ### 6.4 固定 reference 的事后修复实验
 

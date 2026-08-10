@@ -220,7 +220,8 @@ Relative to the previous preferred checkpoint, native foot sliding fell 10.7%
 and jerk fell 8.0%. On the three OMG prompts, foot sliding and jerk both fell
 about 17%, while every noisy repeat still succeeded. This clean checkpoint now
 replaces the warm-start checkpoint as the preferred demo policy. The checkpoint
-remains external to Git and is identified by SHA-256 in `DATA_AND_LICENSES.md`.
+remains external to Git; its distribution boundary is documented in
+`DATA_AND_LICENSES.md`.
 
 A paired clip-cluster bootstrap over the 60 native clips (four noisy repeats
 per clip, 20,000 resamples) gives a 95% interval of +2.1 to +8.8 percentage
