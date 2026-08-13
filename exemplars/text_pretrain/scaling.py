@@ -42,8 +42,8 @@ from pathlib import Path
 
 import numpy as np
 
-from . import spec
-from . import scaling_fit
+import spec
+import scaling_fit
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent           # repo root — the orchestrator subprocess runs here

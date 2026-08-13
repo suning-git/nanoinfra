@@ -40,7 +40,7 @@ entirely because every frame arrives as a base64 PNG.
 **Train the text tokenizer first.** The shared vocabulary's text band is sized by
 whatever tokenizer is on disk, and every band offset after it — including the video
 codes — shifts with that size. With no artifact in `outputs/tokenizer`, core falls
-back to a generic gpt2 tokenizer (vocab 50257 instead of 96786) and says so loudly.
+back to a generic gpt2 tokenizer (vocab 50257 instead of 32768) and says so loudly.
 Training still runs; it is just a different vocabulary, so nothing you measure is
 comparable to the reference numbers, and no checkpoint crosses the boundary.
 

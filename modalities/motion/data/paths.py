@@ -1,10 +1,13 @@
 """
 The motion modality's data-layout authority.
 
-Importing `paths` also registers this package's data sub-dirs on sys.path, so
-the data-leg modules keep flat imports (`import smpl_body`, `import dataset`)
-regardless of which sub-dir they live in. The standard 5-line header at the top
-of each data module walks up to THIS file and imports it.
+Importing this module has NO side effects: the data leg's own modules refer to
+each other by absolute package path (`from modalities.motion.data import ...`),
+like the rest of the repo. The sys.path registration that used to run on import
+— the crutch that let research-era FLAT imports (`import smpl_body`,
+`import dataset`) resolve — still exists, but only as the explicit function
+`register_flat_import_dirs()` below, called by the ARCHIVED projects' own paths
+shims. Live code must not call it.
 
 THREE separated data roots (each overridable by env var):
 
@@ -24,13 +27,24 @@ tokenizers/REGISTRY.md.
 import os
 import sys
 
-# --- import bootstrap: data root + sub-dirs on sys.path (flat imports everywhere) ---
 _PKG = os.path.dirname(os.path.abspath(__file__))                       # modalities/motion/data
-_REPO_ROOT = os.path.abspath(os.path.join(_PKG, "..", "..", ".."))     # repo root (…/core-refactor)
-for _d in (_REPO_ROOT, _PKG,
-           os.path.join(_PKG, "converters"), os.path.join(_PKG, "loaders")):
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
+_REPO_ROOT = os.path.abspath(os.path.join(_PKG, "..", "..", ".."))     # repo root
+
+
+def register_flat_import_dirs():
+    """Put this package's dirs on sys.path so FLAT imports (`import smpl_body`,
+    `import dataset`) resolve — the research-era convention the ARCHIVED motion
+    projects (~111 call sites) are frozen on.
+
+    Compat entry ONLY: it is called by those archived projects' own paths shims,
+    never by the data leg itself — importing modalities.motion.data must not
+    mutate global interpreter state, because the exemplars sit on top of it.
+    """
+    for _d in (_REPO_ROOT, _PKG,
+               os.path.join(_PKG, "converters"), os.path.join(_PKG, "loaders")):
+        if _d not in sys.path:
+            sys.path.insert(0, _d)
+
 
 from core.utils import get_base_dir   # noqa: E402
 

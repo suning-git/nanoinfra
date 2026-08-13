@@ -52,9 +52,10 @@ different architecture, not a tweak of GPT.
 ## Run it
 
 ```bash
-# once: fetch a FineWeb shard (shared with the text exemplar)
-python download_data.py
+# once, FROM THE REPO ROOT: fetch a FineWeb shard (shared with the text exemplar)
+python exemplars/text_pretrain/data/download_shards.py
 
+# then, from this directory
 python run.py     # trains modern + gpt2 (d6, minutes)
 python plot.py    # -> gpt2_vs_modern.png
 ```

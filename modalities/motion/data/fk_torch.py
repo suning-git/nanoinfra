@@ -17,13 +17,7 @@ import sys
 
 import torch
 
-_PKG = os.path.dirname(os.path.abspath(__file__))
-while not os.path.exists(os.path.join(_PKG, "paths.py")) and _PKG != os.path.dirname(_PKG):
-    _PKG = os.path.dirname(_PKG)
-if _PKG not in sys.path:
-    sys.path.insert(0, _PKG)
-import paths  # noqa: F401,E402  (registers package sub-dirs on sys.path)
-import smpl_body as B  # noqa: E402
+from modalities.motion.data.converters import smpl_body as B  # noqa: E402
 
 _CONSTS = {}
 
@@ -75,8 +69,8 @@ def features_to_rootrel(feats):
 # --------------------------------------------------------------- validation
 if __name__ == "__main__":
     import numpy as np
-    import dataset as md
-    import smpl_to_rot139 as conv
+    from modalities.motion.data import dataset as md
+    from modalities.motion.data.converters import smpl_to_rot139 as conv
 
     J_rest_np, parents_np = B.load_body_model("neutral")
     clips, _ = md.load_or_build("val", "amass", verbose=False)

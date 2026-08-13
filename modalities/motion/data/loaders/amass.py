@@ -20,14 +20,9 @@ import sys
 
 import numpy as np
 
-_PKG = os.path.dirname(os.path.abspath(__file__))
-while not os.path.exists(os.path.join(_PKG, "paths.py")) and _PKG != os.path.dirname(_PKG):
-    _PKG = os.path.dirname(_PKG)
-if _PKG not in sys.path:
-    sys.path.insert(0, _PKG)
-import paths            # noqa: E402  (registers package sub-dirs on sys.path)
-import smpl_body as B   # noqa: E402  (load_body_model, UP_AXIS)
-import smpl_to_rot139 as conv  # noqa: E402  (smpl_to_features)
+from modalities.motion.data import paths  # noqa: E402
+from modalities.motion.data.converters import smpl_body as B  # noqa: E402  (load_body_model, UP_AXIS)
+from modalities.motion.data.converters import smpl_to_rot139 as conv  # noqa: E402  (smpl_to_features)
 
 TARGET_FPS = 30.0
 

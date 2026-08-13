@@ -1,20 +1,22 @@
 """
-sample.py — band-masked autoregressive sampling, in two reference implementations.
+sample.py — sample one SEGMENT of the row: a run of same-type tokens (e.g. one latent
+frame's 256 video codes), with the logits masked to that type's vocabulary band.
 
 Over the shared vocabulary the model could emit any id, but after `video_start` only
-video-band ids are legal. Masking the logits to the band enforces the grammar the row
-layout trained, rather than hoping the model learned to stay inside it.
+ids from the video band are legal. Masking the logits to the band enforces the grammar
+the row layout trained, rather than hoping the model learned to stay inside it. (The
+band mask is the mechanism; "generate one segment" is the job — the functions are
+named for the job.)
 
-Two samplers, and the difference between them is the whole cost story:
+Three samplers, and the difference between them is the whole cost story:
 
-    band          recompute the entire prefix for every token. O(n^2), no cache, no
-                  state. It is here as the reference the other two are checked against.
-    band_cached   core's KVCache: prefill the prefix once, then one-token forwards.
-                  Same distribution, ~10x faster at interactive prefix lengths.
-
-    band_static   the same again on core's StaticKVCache: every shape pinned, so
-                  `torch.compile(mode="reduce-overhead")` captures CUDA graphs.
-                  Measured 3.3x the eager static path, 2.4x the dynamic one.
+    segment          recompute the entire prefix for every token. O(n^2), no cache, no
+                     state. The reference the other two are checked against.
+    segment_cached   core's KVCache: prefill the prefix once, then one-token forwards.
+                     Same distribution, ~10x faster at interactive prefix lengths.
+    segment_static   the same again on core's StaticKVCache: every shape pinned, so
+                     `torch.compile(mode="reduce-overhead")` captures CUDA graphs.
+                     Measured 3.3x the eager static path, 2.4x the dynamic one.
 
 All three sample identically by construction: they draw with the same generator over
 the same category layout, so a given seed produces the same codes.
@@ -26,9 +28,9 @@ from core.model.kv_cache import STATIC, KVCache, StaticKVCache
 
 
 @torch.no_grad()
-def band(system, layout, type_id, prefix_ids, stop_id, *, seq_len,
-         temperature=1.0, top_k=40, seed=0, device="cuda", fixed_len=None):
-    """Autoregress `type_id`-band ids after the prefix -> LOCAL code ids.
+def segment(system, layout, type_id, prefix_ids, stop_id, *, seq_len,
+            temperature=1.0, top_k=40, seed=0, device="cuda", fixed_len=None):
+    """Autoregress ids from `type_id`'s vocab band after the prefix -> LOCAL code ids.
 
     fixed_len: emit EXACTLY this many codes and never sample the stop token — right
     for a fixed-shape codec, where a latent frame is always the same number of codes.
@@ -53,10 +55,10 @@ def band(system, layout, type_id, prefix_ids, stop_id, *, seq_len,
 
 
 @torch.no_grad()
-def band_cached(system, layout, type_id, prefix_ids, stop_id, *, seq_len,
-                temperature=1.0, top_k=40, seed=0, device="cuda", fixed_len=None,
-                cache=None, collect_logits=None):
-    """KV-cached `band`. Returns (codes, cache).
+def segment_cached(system, layout, type_id, prefix_ids, stop_id, *, seq_len,
+                   temperature=1.0, top_k=40, seed=0, device="cuda", fixed_len=None,
+                   cache=None, collect_logits=None):
+    """KV-cached `segment`. Returns (codes, cache).
 
     `cache=None` starts fresh and prefills with prefix_ids. Passing a cache back in —
     together with ONLY the ids added since the last call — continues the sequence
@@ -89,7 +91,7 @@ def band_cached(system, layout, type_id, prefix_ids, stop_id, *, seq_len,
 
 
 def _draw(logits, lo, hi, stop_id, temperature, top_k, g):
-    """Mask to the band (plus the stop id, if allowed), then temperature + top-k."""
+    """Mask to the vocab band (plus the stop id, if allowed), then temperature + top-k."""
     masked = torch.full_like(logits, float("-inf"))
     masked[lo:hi] = logits[lo:hi]
     if stop_id is not None:
@@ -102,10 +104,10 @@ def _draw(logits, lo, hi, stop_id, temperature, top_k, g):
 
 
 @torch.no_grad()
-def band_static(system, layout, type_id, prefix_ids, *, seq_len, temperature=1.0,
-                       top_k=40, seed=0, device="cuda", fixed_len=256, cache=None,
-                       collect_logits=None):
-    """The static-path twin of `band_cached`, using core's StaticKVCache.
+def segment_static(system, layout, type_id, prefix_ids, *, seq_len, temperature=1.0,
+                   top_k=40, seed=0, device="cuda", fixed_len=256, cache=None,
+                   collect_logits=None):
+    """The static-path twin of `segment_cached`, using core's StaticKVCache.
 
     fixed_len only, and no stop token: a world model emits a fixed number of codes per
     latent frame, so free-running until a stop id would only invite early-stop artifacts
@@ -133,9 +135,9 @@ def band_static(system, layout, type_id, prefix_ids, *, seq_len, temperature=1.0
     for i in range(fixed_len):
         if collect_logits is not None:
             collect_logits.append(logits.detach().clone())
-        # sampling ops REPLICATE band_cached exactly — multinomial over the same
+        # sampling ops REPLICATE segment_cached exactly — multinomial over the same
         # category layout, so the same seed draws the same codes (acceptance a). Two
-        # differences that change no math: top-k count is the constant min(top_k, band)
+        # differences that change no math: top-k count is the constant min(top_k, band width)
         # (the dynamic path's int(sum()) recomputes the same number with a GPU->CPU sync
         # per token), and the drawn token stays a GPU tensor until the segment ends (one
         # sync per segment instead of 256).

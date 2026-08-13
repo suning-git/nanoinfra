@@ -13,25 +13,24 @@ import sys
 
 import numpy as np
 
-_PKG = os.path.dirname(os.path.abspath(__file__))
-while not os.path.exists(os.path.join(_PKG, "paths.py")) and _PKG != os.path.dirname(_PKG):
-    _PKG = os.path.dirname(_PKG)
-if _PKG not in sys.path:
-    sys.path.insert(0, _PKG)
-import paths  # noqa: E402  (registers package sub-dirs on sys.path)
+from modalities.motion.data import paths  # noqa: E402
 
 
 def _extract(source: str, split: str, verbose: bool, **kw):
     """Build feature clips from a RAW source (all specs share the 139-dim layout for now)."""
     if source == "lafan1":
-        import lafan  # noqa
+        from modalities.motion.data.loaders import lafan
         clips, root0s, _ = lafan.load_feature_clips(split=split, verbose=verbose)
         return clips, root0s
     if source.startswith("amass"):   # amass, or tagged variants (amass_lowdiv, …)
-        import amass  # noqa
+        from modalities.motion.data.loaders import amass
         clips, root0s, _ = amass.load_feature_clips(split=split, verbose=verbose, **kw)
         return clips, root0s
-    raise ValueError(f"unknown source '{source}' (lafan1 | amass[*])")
+    if source == "bones_seed":       # SOMA BVH -> retargeted rot139 (heavy; cached after)
+        from modalities.motion.data.loaders import bones_seed
+        clips, root0s, _ = bones_seed.load_feature_clips(split=split, verbose=verbose, **kw)
+        return clips, root0s
+    raise ValueError(f"unknown source '{source}' (lafan1 | amass[*] | bones_seed)")
 
 
 def load_or_build(split: str, source: str = "lafan1", spec: str = paths.DEFAULT_SPEC,

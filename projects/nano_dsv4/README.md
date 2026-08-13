@@ -31,13 +31,13 @@ From the repo root (single GPU):
 
 ```bash
 # reproduce nano-dsv4 (~92M active params)
-python projects/frontier_arch/scripts/train_nano.py --arch dsv4 --max-steps 4000
+python projects/nano_dsv4/scripts/train_nano.py --arch dsv4 --max-steps 4000
 
 # a params-matched GPT baseline for comparison
-python projects/frontier_arch/scripts/train_nano.py --arch gpt --gpt-dim 800 --gpt-heads 8 --max-steps 4000
+python projects/nano_dsv4/scripts/train_nano.py --arch gpt --gpt-dim 800 --gpt-heads 8 --max-steps 4000
 
 # build + parameter accounting + one timed forward/backward, no training
-python projects/frontier_arch/scripts/train_nano.py --arch dsv4 --dry
+python projects/nano_dsv4/scripts/train_nano.py --arch dsv4 --dry
 ```
 
 Result at 4000 steps (≈0.52B tokens, same data / eval): nano-dsv4 reaches a lower

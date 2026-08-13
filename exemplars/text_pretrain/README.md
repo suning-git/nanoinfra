@@ -33,22 +33,71 @@ assemble→train flow, open that file**; this project only picks knobs and drive
 From the repo root. One-time prerequisites (fresh clone):
 
 ```bash
-python -m exemplars.text_pretrain.data.download_shards   # FineWeb shards -> outputs/base_data/
+python exemplars/text_pretrain/data/download_shards.py   # FineWeb shards -> outputs/base_data/
 python -m modalities.text.train_tokenizer                # tokenizer artifact (seconds) -> outputs/tokenizer/
 ```
 
 ```bash
 # 1 · train the champion  (~4.4 h on one 5090; the checkpoint may already exist)
-CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m exemplars.text_pretrain.pretrain
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python exemplars/text_pretrain/pretrain.py
 
 # 2 · the compute-optimal scaling law — split the depths across both GPUs, then fit:
-CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m exemplars.text_pretrain.scaling run --depths 8 6
-CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m exemplars.text_pretrain.scaling run --depths 4 3 2
-.venv/bin/python -m exemplars.text_pretrain.scaling fit        # -> scaling_law.png + scaling.json
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python exemplars/text_pretrain/scaling.py run --depths 8 6
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python exemplars/text_pretrain/scaling.py run --depths 4 3 2
+.venv/bin/python exemplars/text_pretrain/scaling.py fit        # -> scaling_law.png + scaling.json
 
 # 3 · sample from the champion
-CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m exemplars.text_pretrain.inference
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python exemplars/text_pretrain/inference.py
 ```
+
+## Multi-GPU: ddp vs fsdp, measured
+
+The launcher decides the world size — the orchestrator reads `RANK`, which only
+torchrun sets — and `--parallel` picks the placement:
+
+```bash
+.venv/bin/python exemplars/text_pretrain/pretrain.py --nproc 2 --parallel ddp             # full run
+.venv/bin/python exemplars/text_pretrain/pretrain.py --nproc 2 --parallel ddp --smoke 30  # 30-step smoke
+```
+
+`ddp` replicates the model on every rank and all_reduces gradients DURING
+backward (`core/parallel/nano_ddp.py`); `fsdp` shards parameters per block. How
+much of a step is communication depends on the gradient-accumulation count,
+which `total_batch_size` sets: at the default 131072 (dbs 16 · seq 512 ·
+2 ranks) that is grad_accum 8 — gradients cross the link once per 8
+micro-batches. `total_batch_size=16384` makes it 1, where the overlap has real
+work to do.
+
+Measured on this recipe (d12 / 135M, 2× RTX 5090 PCIe no-NVLink, 30-step smokes,
+median of steps 5–29; run 2026-07-29 in a since-retired fork of this driver —
+the numbers, not the fork, are the artifact):
+
+| arm | total_batch_size | grad_accum | ms/step | tok/s (global) | MFU/GPU |
+|---|---|---|---|---|---|
+| **ddp, 2 GPU** | 131072 | 8 | 382 | **343,454** | 58.8% |
+| ddp, 2 GPU | 16384 | 1 | 52 | 317,011 | 54.3% |
+| fsdp, 2 GPU | 131072 | 8 | 428 | 306,447 | 52.5% |
+| fsdp, 2 GPU | 16384 | 1 | 54 | 300,769 | 51.5% |
+| 1 GPU (baseline) | 131072 | 16 | 750 | 174,732 | 59.8% |
+
+Read off it: scaling efficiency **98.3%** at grad_accum 8 (343,454 / 2×174,732),
+92.7% at grad_accum 1 — the difference is the once-per-step all_reduce becoming
+visible as amortization goes away. And **ddp beats fsdp by ~12%** on the same
+recipe when the model fits comfortably on one card — the replicate-while-it-fits
+rule, reproduced on the text family.
+
+**A trap, not a result**: `--nproc 1 --parallel ddp` measures 129,746 tok/s and
+it is NOT a ddp fact — that combination runs the trunk uncompiled (whole-graph
+compile is off for ddp at any world size; the per-block replacement installs
+only at world > 1). `pretrain.py` warns if you ask for it; baseline = leave
+`--parallel` unset.
+
+To see WHERE the overlap happens — per-bucket all_reduce timing against
+per-block backward compute, CUDA events on both streams — run the probe
+`modalities/tests/ddp_timeline.py` (1 and 2 GPU variants in its docstring).
+Headline from its measurement: 19.7 ms of link traffic hides behind compute at a
+cost of only 4.4 ms of extra backward — 83% hidden; the un-hideable tail (block 0
++ embedding gradients finalize last) is structural, not an implementation flaw.
 
 ## What it produces
 

@@ -22,9 +22,10 @@ reproduces the old raw packing — but opting out has to be WRITTEN DOWN, which 
 the whole difference from before: the old behaviour was the invisible default.
 
 Nothing shipped here declares ``recipe: null``. Its one current user is a
-project-side migration bridge (``projects/frontier_arch``, ``--raw-ruler``) that
-re-measures the old ruler so historical curves can be reconnected — a migration
-artifact owned by the project doing the migrating.
+project-side ``--raw-ruler`` migration bridge that re-measures the old ruler so
+historical curves can be reconnected — a migration artifact owned by the project
+doing the migrating. (Deliberately not naming that project: a modality that points
+at a project goes stale the moment the project is renamed.)
 """
 
 import torch.distributed as dist

@@ -38,7 +38,8 @@ from modalities.motion.data import paths
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--source", default=spec.SOURCE, choices=["lafan1", "amass"])
+    ap.add_argument("--source", default=spec.SOURCE,
+                    choices=["lafan1", "amass", "bones_seed"])
     ap.add_argument("--splits", nargs="+", default=["train", "val"])
     ap.add_argument("--limit", type=int, default=None,
                     help="cap the number of raw clips (a quick check, not a real build)")

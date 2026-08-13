@@ -21,13 +21,8 @@ from typing import Any, Dict, Iterator, Optional
 import numpy as np
 import torch
 
-_PKG = os.path.dirname(os.path.abspath(__file__))
-while not os.path.exists(os.path.join(_PKG, "paths.py")) and _PKG != os.path.dirname(_PKG):
-    _PKG = os.path.dirname(_PKG)
-if _PKG not in sys.path:
-    sys.path.insert(0, _PKG)
-import paths        # noqa: E402  (registers package sub-dirs on sys.path)
-import dataset as md  # noqa: E402
+from modalities.motion.data import paths  # noqa: E402
+from modalities.motion.data import dataset as md  # noqa: E402
 from core.data.data_source import DataSource  # noqa: E402
 from core.data.sequence_recipe import SequenceRecipe  # noqa: E402
 

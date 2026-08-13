@@ -17,12 +17,7 @@ import sys
 
 import numpy as np
 
-_PKG = os.path.dirname(os.path.abspath(__file__))
-while not os.path.exists(os.path.join(_PKG, "paths.py")) and _PKG != os.path.dirname(_PKG):
-    _PKG = os.path.dirname(_PKG)
-if _PKG not in sys.path:
-    sys.path.insert(0, _PKG)
-import paths  # noqa: E402  (registers package sub-dirs on sys.path)
+from modalities.motion.data import paths  # noqa: E402
 
 N_BODY_JOINTS = 22
 SMPL_LFOOT = [7, 10]   # L_ankle, L_foot

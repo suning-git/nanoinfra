@@ -46,7 +46,7 @@ def pin_tokenizer():
     The shared vocab's text band is sized by whatever tokenizer gets loaded, and every
     band offset after it — including the video codes — moves with that size. Without
     the pin, modalities.text looks in its own default location and, finding nothing,
-    falls back to gpt2 (vocab 50257 instead of 96786). It says so loudly, but training
+    falls back to gpt2 (vocab 50257 instead of 32768). It says so loudly, but training
     still runs: a different vocabulary, incomparable numbers, and no checkpoint that
     crosses the boundary. Hence a function every entry point calls, not a comment.
     """

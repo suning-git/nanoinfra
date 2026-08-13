@@ -145,6 +145,33 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
 
     def forward(self, x, cos_sin, kv_cache, block_mask=None, attn_mask=None):
+        # Five attention regimes, dispatched below by mask argument and shape.
+        # Each is bound to the fastest kernel that supports its constraint; the branch
+        # order is precedence, and exactly one runs:
+        #
+        #   attn_mask set      static-shape decode (StaticKVCache) | hand-written matmul
+        #                      a bool mask kicks sdpa off its fast kernels — +0.7
+        #                      ms/token over 12 layers when paid EVERY token. Flex was
+        #                      MEASURED here and lost (torch 2.12, FlexDecoding via the
+        #                      score_mod-offset idiom, compiled, 12 heads x 64 dims):
+        #                      T=1/KV=1536 tie (40 vs 43 us) — T=1/KV=8704 3.9x slower
+        #                      (185 vs 47) — T=256/KV=8704 1.4x slower (350 vs 243).
+        #                      A BlockMask could skip the invalid tail, but it is
+        #                      host-built per step (incompatible with graph replay),
+        #                      and a rollout runs the cache nearly full anyway.
+        #   block_mask set     structured training masks (block-causal, prefix-LM) | flex
+        #                      the mask is huge but BLOCK-sparse; flex never
+        #                      materializes it and skips dead tiles — its home turf.
+        #   no cache / Tq==Tk  dense causal (training, full-prefix pass) | sdpa
+        #                      is_causal=True rides FlashAttention, the fastest dense
+        #                      path.
+        #   dynamic, Tq==1     single-token cached decode | sdpa, maskless
+        #                      K/V arrive sliced to the valid length and every cached
+        #                      position is the past, so no mask is needed at all.
+        #   dynamic, 1<Tq<Tk   chunked continuation (append a prompt segment) | sdpa
+        #                      with a bool prefix+tril mask — the slow-kernel penalty
+        #                      the first row avoids per token is paid here ONCE per
+        #                      chunk, where it is noise.
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
@@ -188,13 +215,12 @@ class CausalSelfAttention(nn.Module):
             scores = torch.where(attn_mask, scores.float(), float("-inf"))
             y = torch.softmax(scores, -1).to(v.dtype) @ v
         elif block_mask is not None:
-            # FlexAttention mode: use custom attention pattern (e.g., prefix-LM)
-            # FlexAttention doesn't natively support GQA yet, so we expand KV heads
-            if self.enable_gqa:
-                n_rep = self.n_head // self.n_kv_head
-                k = k.repeat_interleave(n_rep, dim=1)
-                v = v.repeat_interleave(n_rep, dim=1)
-            y = flex_attention(q, k, v, block_mask=block_mask)
+            # FlexAttention mode: use custom attention pattern (e.g., prefix-LM).
+            # GQA is native since torch 2.5 (this branch used to expand KV heads by
+            # hand; enable_gqa is bitwise-identical to that expansion — verified
+            # 2026-07-30 on torch 2.12 across three H/KV/T/D shapes).
+            y = flex_attention(q, k, v, block_mask=block_mask,
+                               enable_gqa=self.enable_gqa)
         elif kv_cache is None or Tq == Tk:
             # During training (no KV cache), attend as usual with causal attention
             # And even if there is KV cache, we can still use this simple version when Tq == Tk

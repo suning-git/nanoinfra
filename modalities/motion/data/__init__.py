@@ -13,4 +13,4 @@ stays light — the assembler path needs no torch/SMPL):
     from modalities.motion.data import fk_torch
 """
 
-from modalities.motion.data import paths  # noqa: F401  (runs the sys.path bootstrap)
+from modalities.motion.data import paths  # noqa: F401  (layout constants; no side effects)

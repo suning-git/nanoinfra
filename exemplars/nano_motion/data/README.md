@@ -10,52 +10,33 @@ representation everything speaks, and the **codec** is what turns it into intege
 
 ## Which dataset, and what it lets you train
 
-| | LAFAN1 | AMASS + HumanML3D |
-|---|---|---|
-| how to get it | `download.py` | by hand — see below |
-| captions | none | yes, from HumanML3D |
-| trains | a tokenizer, an unconditional motion model | the same, plus **text→motion** |
-| size | ~1GB raw | ~26GB raw |
+| | LAFAN1 | AMASS + HumanML3D | Bones-SEED |
+|---|---|---|---|
+| how to get it | `download.py` | by hand — both need an account | by hand — license |
+| captions | none | yes, from HumanML3D | none here¹ |
+| trains | a tokenizer, an unconditional model | the same, plus **text→motion** | the same, at ~30x LAFAN1's volume |
+| size | ~1GB raw | ~26GB raw | ~40GB raw |
 
 LAFAN1 is the default because it needs no registration, and it exercises the entire
 pipeline. Text conditioning needs captions, and the only motion caption set of real
-size is HumanML3D, which is written against AMASS. Both require accepting a license
-in person:
+size is HumanML3D, which is written against AMASS. The others require accepting a
+license in person:
 
-- **AMASS** — https://amass.is.tue.mpg.de. Register, accept the licence per subset,
-  take the "SMPL+H G" archives, unpack to `datasets/amass/<Subset>/<subject>/*.npz`.
-  Which subsets is up to you; the index references about a dozen.
-- **HumanML3D** — https://github.com/EricGuo5513/HumanML3D. Follow its README to the
-  point where it has produced `index.csv`, `texts/`, `train.txt` and `val.txt`, then
-  copy those four into `datasets/humanml3d/`.
+- AMASS — https://amass.is.tue.mpg.de, per-subset downloads, unpack to
+  `datasets/amass/<Subset>/<subject>/*.npz`
+- HumanML3D — https://github.com/EricGuo5513/HumanML3D, gives you `index.csv`,
+  `texts/` and the split lists; put them under `datasets/humanml3d/`
+- Bones-SEED — https://bones.studio (SEED license), unpack so the BVH corpus sits at
+  `datasets/bones_seed/soma_uniform/bvh/`. The shipped data is raw capture (78-joint
+  SOMA BVH + G1 robot packages); `prepare.py --source bones_seed` retargets it onto
+  the SMPL skeleton and into rot139 (converters/soma_retarget.py — position-based,
+  convention-free, 120→30fps). This is the heavy one: ~129k clips, hours with many
+  workers, done once. Split is by held-out ACTORS, like AMASS's held-out subjects.
 
-HumanML3D is **captions only** — it says which frame range of which AMASS file each
-caption describes. Without AMASS there is nothing to caption; without HumanML3D there
-is nothing to condition on.
+¹ Bones-SEED ships temporal labels in `metadata/`; pairing them is research-side
+  (`t2m_bones_*` caches), not part of this exemplar.
 
-```bash
-python -m exemplars.nano_motion.data.download --check
-```
-
-reports what is present and, for anything missing, what it blocks.
-
-### Three details the pairing gets right
-
-Worth knowing if you re-target this, because none of them is visible in the index file
-and each one fails silently:
-
-1. **The index is in 20 fps.** HumanML3D annotates a 20fps resampling of AMASS, while
-   this package decimates by an integer stride toward 30 — so the rate it lands on is
-   not always exactly 30 (a 100fps source lands on 33.3). The crop is therefore mapped
-   by FRACTION OF THE CLIP, which is right whatever either rate turns out to be.
-2. **The split is HumanML3D's own** (`train.txt` / `val.txt`), not a fresh random one.
-   Its test set is held back.
-3. **Mirrored ids (`M****`) are skipped.** HumanML3D augments with left-right flipped
-   motion; the captions for those exist but the flipped features do not, so pairing
-   them would caption motion that is not there.
-
-Rows that do not resolve — `humanact12` is a different dataset, and any subset you did
-not download — are counted and reported rather than dropped quietly.
+`download.py --check` reports what is present.
 
 ## rot139, and why the root is a displacement
 
@@ -74,11 +55,11 @@ codec — so it lives beside the dataset, at `datasets/<source>/rot139/<split>.n
 
 ## What it costs
 
-| step | LAFAN1 | AMASS |
-|---|---|---|
-| `prepare.py` | ~2 min | an hour or more (LAFAN1 path only — `humanml3d` crops inside `encode.py`) |
-| `train_codec.py` | ~30 min for the full 30k steps on one GPU | same |
-| `encode.py` | seconds | minutes |
+| step | LAFAN1 | AMASS | Bones-SEED |
+|---|---|---|---|
+| `prepare.py` | ~2 min | an hour or more | hours (129k clips, retarget) |
+| `train_codec.py` | ~30 min for the full 30k steps on one GPU | same | same |
+| `encode.py` | seconds | minutes | minutes |
 
 `prepare.py` and `train_codec.py` are each done once. Only `encode.py` needs
 repeating, and only when you change codec.
@@ -88,7 +69,7 @@ repeating, and only when you change codec.
 **Train the text tokenizer first.** The shared vocabulary's text band is sized by
 whatever tokenizer is on disk, and every band offset after it — including the motion
 codes — moves with it. With nothing in `outputs/tokenizer`, core falls back to a
-generic gpt2 tokenizer (vocab 50257 instead of 96786) and says so loudly. Training
+generic gpt2 tokenizer (vocab 50257 instead of 32768) and says so loudly. Training
 still runs; it is a different vocabulary, so no checkpoint and no number crosses the
 boundary.
 

@@ -46,13 +46,13 @@ Requires Python ≥ 3.12 and a CUDA GPU for training.
 
 ```bash
 # 1 · fetch a few FineWeb shards (into outputs/base_data/)
-python -m exemplars.text_pretrain.data.download_shards
+python exemplars/text_pretrain/data/download_shards.py
 
 # 2 · train YOUR tokenizer on those shards (seconds; writes outputs/tokenizer/)
 python -m modalities.text.train_tokenizer
 
 # 3 · train the model (see the exemplar README for the full train / measure / sample recipe)
-CUDA_VISIBLE_DEVICES=0 python -m exemplars.text_pretrain.pretrain
+CUDA_VISIBLE_DEVICES=0 python exemplars/text_pretrain/pretrain.py
 ```
 
 Yes, you train the tokenizer yourself — it's a from-scratch framework all the way
@@ -64,7 +64,7 @@ lifecycle — train → compute-optimal scaling law → inference — and
 [`RESULTS.md`](exemplars/text_pretrain/RESULTS.md) pins exactly what it produces.
 
 The other two start from their own data. `nano_world_model` downloads a public
-VizDoom recording (or records its own, if you install the game);  `nano_motion` runs
+VizDoom recording (or records its own, if you install the game); `nano_motion` runs
 on freely downloadable motion capture, and adds text conditioning if you accept the
 licences for AMASS and HumanML3D. Each has a `data/README.md` covering what to fetch,
 what it costs, and what will bite you.

@@ -13,9 +13,9 @@ nano-dsv4 plugs into the nanoinfra trunk seam (build_system) with zero changes
 to core -- that is the whole point of this example.
 
 Usage (single GPU, from repo root):
-  python projects/nano_dsv4/train_nano.py --arch dsv4 --max-steps 4000
-  python projects/nano_dsv4/train_nano.py --arch dsv4 --dry     # build + param count + one timed step
-  python projects/nano_dsv4/train_nano.py --arch gpt --gpt-dim 800 --gpt-heads 8   # a params-matched GPT baseline
+  python projects/nano_dsv4/scripts/train_nano.py --arch dsv4 --max-steps 4000
+  python projects/nano_dsv4/scripts/train_nano.py --arch dsv4 --dry   # build + param count + one timed step
+  python projects/nano_dsv4/scripts/train_nano.py --arch gpt --gpt-dim 800 --gpt-heads 8   # params-matched GPT
 
 Note: this is a reference implementation running in eager mode (~8% MFU on a
 5090). It is meant to be read and to verify the architecture trains, not for

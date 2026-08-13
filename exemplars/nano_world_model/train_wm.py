@@ -7,8 +7,8 @@ This is the whole assembly, in one readable file, in the order it happens:
 
 Read it top to bottom and you know what this run is. Nothing is discovered, nothing
 is registered, nothing is injected: components are imported and wired here, which is
-core/vision.md's principle 4 (orchestrators own assembly) and its "library over
-framework" stance. The Trainer executes; it does not decide.
+core's "orchestrators own assembly" principle and its library-over-framework stance.
+The Trainer executes; it does not decide.
 
 WHAT THE MODEL IS. A decoder-only transformer over a shared vocabulary whose bands
 are [text | control | video | action]. A clip of 17 game frames becomes 5 latent

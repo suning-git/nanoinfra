@@ -45,7 +45,7 @@ _FLEX_PATCHED = False
 def use_compiled_flex_attention():
     """Point core's flex_attention symbol at the COMPILED kernel. Call once, early.
 
-    Not an import side effect on purpose (core/vision.md: no magic globals) — but
+    Not an import side effect on purpose (core has no magic globals) — but
     also not optional: eager flex_attention silently runs a debug path with WRONG
     outputs (causal propagation dead; torch itself says "SOLUTION: Use
     torch.compile(flex_attention)"). `RowLayout.train_block_mask` asserts this ran,

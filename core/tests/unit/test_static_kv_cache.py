@@ -5,7 +5,9 @@ The static path exists to be fast, and it is only worth having if it is also rig
 Two things are checked, and neither needs a trained model — both are about kernels and
 indexing, which do not care what the weights contain:
 
-  1. Logit equivalence against KVCache, teacher-forced. Both caches consume the SAME
+  1. Hidden-state equivalence against KVCache, teacher-forced (GPT.forward returns
+     trunk hidden states, not logits — the "argmax" below is over hidden dims, a
+     fingerprint rather than a next-token decision). Both caches consume the SAME
      token sequence, so a disagreement is pure numerics rather than one path having
      drifted into a different context.
 
@@ -149,6 +151,31 @@ def test_incremental_decode_matches():
         d, s = model(nxt, kv_cache=dyn), model(nxt, kv_cache=STATIC)
         assert _rel(d, s) < 5e-2, f"diverged at pos {int(st.pos)}: rel {_rel(d, s):.2e}"
         assert_argmax_agrees(d, s)
+
+
+@torch.no_grad()
+def test_rewind_forgets_bitwise():
+    """rewind is the block-diffusion op: insert a speculative chunk, forget it, go on.
+    Forgetting must be TOTAL — the forgotten keys sit physically in the buffer, and
+    only the mask makes them unreadable. So the check is bitwise, not approximate:
+    the same forward on the same cache state must not see any trace of the junk.
+    (Bitwise is fair here because both sides run the IDENTICAL static path — this is
+    a state test, not a kernels test.)"""
+    model = _model(4)
+    idx, chunk, junk = _tokens(20), _tokens(8, seed=2), _tokens(6, seed=3)
+
+    st = _static(model)
+    model(idx, kv_cache=STATIC)
+    direct = model(chunk, kv_cache=STATIC)
+
+    st.reset()
+    model(idx, kv_cache=STATIC)
+    model(junk, kv_cache=STATIC)          # speculative insert, as a denoise step does
+    st.rewind(junk.size(1))
+    again = model(chunk, kv_cache=STATIC)
+
+    assert torch.equal(direct, again), \
+        "rewound cache is not bitwise-identical to one that never saw the junk"
 
 
 @torch.no_grad()

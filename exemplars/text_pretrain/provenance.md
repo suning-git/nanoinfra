@@ -56,7 +56,7 @@ machinery — set `spec.LR_MAX` to each candidate and run stage 1:
 
 ```bash
 # for each candidate: edit LR_MAX = "<lr>" in spec.py, then
-CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m exemplars.text_pretrain.pretrain
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python exemplars/text_pretrain/pretrain.py
 ```
 
 `spec.ckpt_dir()` tags checkpoints by (depth, lr), so candidate runs never
