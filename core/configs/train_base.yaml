@@ -15,6 +15,11 @@ max_steps: -1                # total training steps (-1 = auto-compute from the 
 target_param_data_ratio: 20  # used when auto-computing max_steps (Chinchilla optimal = 20)
 num_iterations: -1           # early-stop iteration count (-1 = no early stop; only stops, not used elsewhere)
 seed: 42                     # RNG seed (init + training; the orchestrator passes it to setup_model_for_training)
+abort_on_nonfinite: true     # stop the moment the gradient norm goes nan/inf, BEFORE the optimizer
+                             #   writes it into the weights. This loop is bf16 with no GradScaler, so a
+                             #   non-finite gradient is never routine and never heals: clip_grad_norm_
+                             #   divides by that norm, so one nan poisons every weight from then on.
+                             #   Set false only to reproduce legacy behaviour (train on through it).
 
 # ============================================================================
 # Hardware and batch config

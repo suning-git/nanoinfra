@@ -5,7 +5,7 @@ _hf/ cache dir, then move + rename with the `shard_NNN_00000.parquet` prefix so
 files sort AFTER the existing shards). All-but-last sorted shard = train, last =
 val (modalities/text/fineweb.py convention), so the new last shard becomes val.
 
-Run: .venv/bin/python exemplars/text_pretrain/download_shards.py 003 004 005
+Run: .venv/bin/python exemplars/text_pretrain/data/download_shards.py 003 004 005
 """
 import shutil
 import sys
@@ -14,8 +14,14 @@ from pathlib import Path
 import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
 
+from core.utils import get_base_dir
+
 REPO = "HuggingFaceFW/fineweb"
-BASE = Path("outputs/base_data")
+# Resolved the same way every reader resolves it (core.utils.get_base_dir, honouring
+# NANOINFRA_BASE_DIR) rather than hardcoded: this script WRITES the directory that
+# fineweb.list_parquet_files READS, and a writer that computes the path differently
+# from its reader is a bug that only shows up for whoever relocates outputs/.
+BASE = Path(get_base_dir()) / "base_data"
 CACHE = BASE / "_hf"
 
 

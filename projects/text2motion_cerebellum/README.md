@@ -408,3 +408,13 @@ still lost 15.42 native-success points. Neither run qualified for three-policy
 expansion. These experiments reject the small-corpus recipe; they do not rule out
 training on a substantially larger mixed long-action corpus. Compact values and
 source hashes are in `results/long_horizon_results.json`.
+
+### Self-trained NanoInfra generator follow-up
+
+The OMG system above remains the pretrained baseline. A separate follow-up under
+[`projects/nano_motion_cerebellum`](../nano_motion_cerebellum/) trains a 140M
+NanoInfra `nano_motion` Text2Motion model, connects it through SMPL-H/GMR to the
+same frozen G1 trackers, and evaluates it under the same three-policy/four-repeat
+protocol. It completes the full interface at 30/36 successes (83.3%), versus
+34/36 (94.4%) for OMG. The follow-up is reported as a working self-trained demo,
+not as an improvement over OMG.

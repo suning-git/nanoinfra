@@ -113,10 +113,10 @@ def main():
     # --- 2 + 3. greedy decode, including an interactive continuation ----------
     dyn_cache = st_cache = None
     for si, pre in enumerate([prefix, [a_off + 9] * 4, [a_off + 13] * 4]):
-        d, dyn_cache = sample.band_cached(
+        d, dyn_cache = sample.segment_cached(
             system, layout, tid, pre, None, seq_len=args.seq_len,
             temperature=1.0, top_k=1, seed=0, fixed_len=args.tokens, cache=dyn_cache)
-        s, st_cache = sample.band_static(
+        s, st_cache = sample.segment_static(
             system, layout, tid, pre, seq_len=args.seq_len,
             temperature=1.0, top_k=1, seed=0, fixed_len=args.tokens, cache=st_cache)
         agree = sum(a == b for a, b in zip(d, s))
@@ -130,7 +130,7 @@ def main():
             cache = StaticKVCache.for_model(system.trunk.config, 1, args.seq_len)
             torch.cuda.synchronize()
             t0 = time.time()
-            sample.band_static(system, layout, tid, prefix, seq_len=args.seq_len,
+            sample.segment_static(system, layout, tid, prefix, seq_len=args.seq_len,
                                       temperature=0.85, top_k=100, seed=r,
                                       fixed_len=args.tokens, cache=cache)
             torch.cuda.synchronize()

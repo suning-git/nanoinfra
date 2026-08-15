@@ -36,7 +36,7 @@ def pin_tokenizer():
     The shared vocab's text band is sized by whatever tokenizer is on disk, and every
     band offset after it — including the motion codes — moves with that size. Without
     a trained artifact, modalities.text falls back to gpt2 (vocab 50257 instead of
-    96786) and says so loudly; training still runs, on a different vocabulary, and no
+    32768) and says so loudly; training still runs, on a different vocabulary, and no
     checkpoint crosses the boundary. Hence a function every entry point calls.
     """
     import os
@@ -50,7 +50,7 @@ MOTION_END = "motion_end"
 
 
 # --- 2. REPRESENTATION --------------------------------------------------------
-SOURCE = "lafan1"        # "lafan1" (no captions) or "amass" (captions via HumanML3D)
+SOURCE = "lafan1"        # "lafan1" | "amass" (captions via humanml3d) | "bones_seed"
 D_FEAT = 139             # rot139: joint rotations + root displacement/height + contacts
 FPS = 30.0
 

@@ -37,19 +37,16 @@ total_batch_size: 4096
 seed: 42
 
 # ----------------------------------------------------------------------------
-# The RECIPE: which tokens go where, and which of them carry loss. A declaration
-# read by the DataSource — not code.
-#
-# `supervise_tags` is ONE TAG PER TEMPLATE SLOT and `supervise` lists the tags that
-# carry loss, so the two lines read as a mask under the template above them. The t2m
-# recipe marks the caption half 0 and the motion half 1: the model is not being taught
-# to write captions, and supervising them would spend capacity doing it.
+# The RECIPE: which tokens go where, and which of them carry loss. A declaration,
+# read by the DataSource — not code. The t2m recipe supervises the motion half
+# ONLY: the model is not being taught to write captions, and supervising them
+# would spend capacity doing it.
 # ----------------------------------------------------------------------------
 recipe:
   t2m:
-    template:       [bos, text_start, text_tokens, text_end, motion_start, motion_tokens, motion_end, eos]
-    supervise_tags: [  0,          0,           0,        0,             1,             1,          1,   1]
-    supervise: [1]
+    template: [bos, text_start, text_tokens, text_end,
+               motion_start, motion_tokens, motion_end, eos]
+    supervise: [motion_tokens, motion_end]
   motion:
     template: [bos, motion_start, motion_tokens, motion_end, eos]
     supervise: all

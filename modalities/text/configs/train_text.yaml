@@ -114,9 +114,11 @@ evaluation:
       bpb_metric: val/bpb
     # A stream may also declare `recipe: null` ("assemble nothing" — raw packing).
     # That is a real capability, not shipped here: the only current user is a
-    # PROJECT-side migration bridge (projects/frontier_arch/scripts/train_mini.py
-    # --raw-ruler) that re-measures the pre-2026-07-26 ruler so historical curves
-    # can be reconnected. A migration artifact belongs to the project doing the
+    # project-side migration bridge that re-measures the pre-2026-07-26 ruler so
+    # historical curves can be reconnected. (Deliberately not naming the project:
+    # a modality that points at a project goes stale the moment that project is
+    # renamed -- which is exactly what happened to the previous version of this
+    # comment.) A migration artifact belongs to the project doing the
     # migrating, not to the modality everyone inherits.
 
 checkpoint:

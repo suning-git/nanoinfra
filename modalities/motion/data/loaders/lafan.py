@@ -11,13 +11,8 @@ import os
 import sys
 import warnings
 
-_PKG = os.path.dirname(os.path.abspath(__file__))
-while not os.path.exists(os.path.join(_PKG, "paths.py")) and _PKG != os.path.dirname(_PKG):
-    _PKG = os.path.dirname(_PKG)
-if _PKG not in sys.path:
-    sys.path.insert(0, _PKG)
-import paths  # noqa: E402  (registers package sub-dirs on sys.path)
-import bvh_to_rot139 as conv  # noqa: E402
+from modalities.motion.data import paths  # noqa: E402
+from modalities.motion.data.converters import bvh_to_rot139 as conv  # noqa: E402
 
 LAFAN_DIR = paths.LAFAN1_DIR
 FPS = 30.0

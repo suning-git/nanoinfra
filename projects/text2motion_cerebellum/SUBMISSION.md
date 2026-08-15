@@ -17,6 +17,11 @@ This project follows the NanoInfra convention: project source lives under
   and held-out domain-adaptation negative result;
 - three compact skeleton demo videos and their poster images;
 - compact JSON summaries under `results/`.
+- the self-trained NanoInfra generator extension under
+  `projects/nano_motion_motionhub/` and `projects/nano_motion_cerebellum/`,
+  including compact aggregate results and three additional demo videos.
+- the `nano_motion` supervision-config fix required for the documented training
+  command to construct a valid sequence recipe.
 
 ## Exclude
 
@@ -34,12 +39,15 @@ This project follows the NanoInfra convention: project source lives under
 ```bash
 python3 -m unittest discover \
   -s projects/text2motion_cerebellum -p 'test_*.py' -v
+python3 -m unittest discover \
+  -s projects/nano_motion_cerebellum -p 'test_*.py' -v
 git diff --check
 git status --short
 ```
 
 Review the staged set explicitly before committing. The intended change set is the
-project directory plus the repository-root README discovery link; edits under
+three project directories, the repository-root README discovery link, and the
+single `exemplars/nano_motion/configs/train_t2m.yaml` supervision fix. Edits under
 `remote/autodl/` are infrastructure work and must be submitted separately, if at
 all.
 

@@ -26,12 +26,17 @@ ORCHESTRATOR = "modalities.text.train_text"
 MODELS_ROOT  = str(Path(__file__).resolve().parents[2] / "models" / "exemplars")
 
 
-def ckpt_dir(depth=DEPTH, lr=LR_MAX):
-    """Where the champion for a given (depth, lr) lives on disk."""
-    return f"{MODELS_ROOT}/text_pretrain_d{depth}_lr{lr}"
+def ckpt_dir(depth=DEPTH, lr=LR_MAX, parallel=None):
+    """Where the champion for a given (depth, lr) lives on disk.
+
+    `parallel` lands in the path only when explicitly chosen: a ddp arm and an
+    fsdp arm of the same recipe are a comparison, and must not overwrite each
+    other. The default (None) keeps the historical single-GPU champion path."""
+    base = f"{MODELS_ROOT}/text_pretrain_d{depth}_lr{lr}"
+    return base + (f"_{parallel}" if parallel else "")
 
 
-def train_overrides(depth=DEPTH, lr=LR_MAX, **extra):
+def train_overrides(depth=DEPTH, lr=LR_MAX, parallel=None, **extra):
     """Hydra CLI overrides pinning this project's recipe on top of the
     orchestrator's blessed defaults. Checkpointing / eval cadence are per-stage
     concerns (the champion saves; scaling cells do not) — a stage adds those via
@@ -44,5 +49,7 @@ def train_overrides(depth=DEPTH, lr=LR_MAX, **extra):
         "max_steps": -1,        # Chinchilla auto-size (token budget from DEPTH)
         "use_compile": "true",
     }
+    if parallel:
+        ov["parallel"] = parallel   # multi-GPU placement; see pretrain.py --parallel
     ov.update(extra)
     return [f"{k}={v}" for k, v in ov.items()]

@@ -23,6 +23,7 @@ Subclassing LMSystem rather than wrapping it keeps `state_dict()` keys unchanged
 such a System's checkpoints stay interchangeable with any other over the same trunk.
 """
 
+import math
 import os
 import time
 
@@ -36,6 +37,69 @@ import torch
 from core.utils import print0, DummyWandb
 from core.training.lr_schedulers import get_lr_multiplier
 from core.parallel import sync_gradients
+
+
+def clip_gradients(system, max_grad_norm: float, step: int,
+                   abort_on_nonfinite: bool = True) -> float:
+    """Clip gradients and return the norm; abort if that norm is non-finite.
+
+    The abort is torch's own ``error_if_nonfinite``, not a check of ours, and the
+    reason is timing: it raises BEFORE the gradients are scaled, so ``.grad`` still
+    holds the raw per-parameter values. That is the difference between a usable
+    post-mortem and none — a per-parameter scan (which is how you find WHICH module
+    produced the nan) reads ``[nan, 2.0, 3.0]`` after this raises, but would read
+    ``[nan, nan, nan]`` if the clip had been allowed to run first, because a nan
+    norm makes the scale factor nan and poisons every gradient in the model.
+
+    Aborting rather than skipping the step: this loop is bf16 autocast with no
+    GradScaler (see Trainer.__init__), so there is no loss-scaling regime here in
+    which an occasional non-finite gradient is routine and gets skipped. It is a
+    bug every time, and the next opt.step() would write it into the weights.
+
+    Cost: none. ``error_if_nonfinite`` reuses the norm torch already computed.
+
+    Ranks abort together: NanoDDP all-reduces gradients before this is called, and
+    FSDP2 on a 1-D mesh returns a replicated norm, so every rank sees the same
+    value. A future 2-D mesh (TP/CP) could hand back a partial norm per rank —
+    that would need a collective here, or one rank raises while the others hang.
+    """
+    try:
+        grad_norm_tensor = torch.nn.utils.clip_grad_norm_(
+            system.parameters(), max_grad_norm,
+            error_if_nonfinite=abort_on_nonfinite,
+        )
+    except RuntimeError as e:
+        # torch's message does not carry the step, and the step is the first thing
+        # a post-mortem needs. The gradients are UNCLIPPED at this point.
+        raise RuntimeError(
+            f"non-finite gradient norm at step {step} — aborted before clipping, so "
+            f".grad still holds the raw per-parameter values (scan them to find which "
+            f"module produced it).\n"
+            f"  The optimizer has not stepped on these gradients. Whether the WEIGHTS "
+            f"are finite depends on where the run started; check, do not assume.\n"
+            f"  To train through it anyway: abort_on_nonfinite: false — but in bf16 "
+            f"without a loss scaler this does not recover, it only hides."
+        ) from e
+    grad_norm = grad_norm_tensor.item() if hasattr(grad_norm_tensor, 'item') \
+        else float(grad_norm_tensor)
+    if not math.isfinite(grad_norm):
+        if abort_on_nonfinite:
+            # Belt and braces. torch's error_if_nonfinite should have raised above,
+            # so reaching here means the norm came back non-finite by some path that
+            # check did not cover. Abort anyway — the guarantee this function offers
+            # is "the optimizer never steps on a non-finite gradient", and that
+            # guarantee must not depend on one upstream implementation detail.
+            raise RuntimeError(
+                f"non-finite gradient norm ({grad_norm}) at step {step}, and torch's "
+                f"error_if_nonfinite did not catch it — the gradients HAVE been "
+                f"scaled by now, so a per-parameter scan will read nan everywhere."
+            )
+        # abort_on_nonfinite is off. Say it once, loudly: the incident this guard
+        # exists for was 277 steps of nan that nothing in the log ever named.
+        print0(f"[step {step}] non-finite gradient norm ({grad_norm}) and "
+               f"abort_on_nonfinite is off — the optimizer is about to step on it. "
+               f"Losses from here on are expected to be nan.")
+    return grad_norm
 
 
 def create_optimizers(system, optimizer_config: dict, world_size: int):
@@ -180,6 +244,7 @@ class Trainer:
         self.device_batch_size = config['device_batch_size']
         self.total_batch_size = config['total_batch_size']
         self.max_grad_norm = self.optimizer_config['max_grad_norm']
+        self.abort_on_nonfinite = config.get('abort_on_nonfinite', True)
         self.logging_config = config.get('logging', {})
 
         # Calculate gradient accumulation
@@ -500,13 +565,10 @@ class Trainer:
                 loss.backward()
 
         # Clip gradients on the system's raw registered params (shared with the
-        # compiled trunk, so backward populated their .grad)
-        grad_norm_tensor = torch.nn.utils.clip_grad_norm_(
-            self.system.parameters(),
-            self.max_grad_norm
-        )
-        # Convert to scalar (handle DTensor from FSDP)
-        grad_norm = grad_norm_tensor.item() if hasattr(grad_norm_tensor, 'item') else float(grad_norm_tensor)
+        # compiled trunk, so backward populated their .grad). Aborts here, before
+        # the clip touches anything, if the norm is non-finite.
+        grad_norm = clip_gradients(self.system, self.max_grad_norm, step,
+                                   self.abort_on_nonfinite)
 
         # Optimizer step - step all optimizers
         for opt in self.optimizers:

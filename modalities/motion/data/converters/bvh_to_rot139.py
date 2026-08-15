@@ -16,13 +16,8 @@ import sys
 
 import numpy as np
 
-_PKG = os.path.dirname(os.path.abspath(__file__))
-while not os.path.exists(os.path.join(_PKG, "paths.py")) and _PKG != os.path.dirname(_PKG):
-    _PKG = os.path.dirname(_PKG)
-if _PKG not in sys.path:
-    sys.path.insert(0, _PKG)
-import paths  # noqa: E402  (registers package sub-dirs on sys.path)
-import geometry as G  # noqa: E402
+from modalities.motion.data import paths  # noqa: E402
+from modalities.motion.data import geometry as G  # noqa: E402
 
 # LAFAN1 skeleton (22 joints): foot joints for contact detection
 LFOOT_IDX = [3, 4]   # LeftFoot, LeftToe

@@ -21,7 +21,7 @@ Config shape::
 
 ``recipe: null`` is legal on a stream and means "assemble nothing" (raw packing).
 It is never the default and never silent — a caller that wants it declares it,
-the way ``projects/frontier_arch``'s ``--raw-ruler`` migration bridge does.
+the way a project-side ``--raw-ruler`` migration bridge does.
 """
 
 from __future__ import annotations

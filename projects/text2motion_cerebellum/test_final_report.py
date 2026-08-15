@@ -21,6 +21,7 @@ GENERATOR_DIAGNOSIS = PROJECT / "results/generator_diagnosis_results.json"
 SHORT_HORIZON = PROJECT / "results/short_horizon_results.json"
 LONG_HORIZON = PROJECT / "results/long_horizon_results.json"
 SUBMISSION_FILES = PROJECT / "submission_files.txt"
+NANO_MOTION_CONFIG = ROOT / "exemplars/nano_motion/configs/train_t2m.yaml"
 
 
 def load(path: Path) -> dict:
@@ -305,6 +306,9 @@ def test_public_submission_docs_do_not_contain_machine_credentials() -> None:
         PROJECT / "FINAL_REPORT_CN.md",
         PROJECT / "DATA_AND_LICENSES.md",
         PROJECT / "SUBMISSION.md",
+        ROOT / "projects/nano_motion_cerebellum/README.md",
+        ROOT / "projects/nano_motion_cerebellum/DATA_AND_LICENSES.md",
+        ROOT / "projects/nano_motion_motionhub/README.md",
     ]
     forbidden = (
         "BEGIN " + "OPENSSH PRIVATE KEY",
@@ -320,6 +324,12 @@ def test_public_submission_docs_do_not_contain_machine_credentials() -> None:
     assert "BONES-SEED" in combined and "SEED license" in combined
 
 
+def test_nano_motion_t2m_recipe_uses_valid_named_supervision() -> None:
+    config = NANO_MOTION_CONFIG.read_text(encoding="utf-8")
+    assert "supervise: [motion_tokens, motion_end]" in config
+    assert "supervise_tags:" not in config
+
+
 def test_submission_allow_list_is_complete_and_scoped() -> None:
     entries = [
         line.strip()
@@ -329,7 +339,11 @@ def test_submission_allow_list_is_complete_and_scoped() -> None:
     assert len(entries) == len(set(entries))
     assert entries == sorted(entries)
     assert all(
-        path == "README.md" or path.startswith("projects/text2motion_cerebellum/")
+        path == "README.md"
+        or path == "exemplars/nano_motion/configs/train_t2m.yaml"
+        or path.startswith("projects/text2motion_cerebellum/")
+        or path.startswith("projects/nano_motion_cerebellum/")
+        or path.startswith("projects/nano_motion_motionhub/")
         for path in entries
     )
     assert all((ROOT / path).is_file() for path in entries)
@@ -348,6 +362,12 @@ def test_submission_allow_list_is_complete_and_scoped() -> None:
         "projects/text2motion_cerebellum/assets/demo/turn-right.png",
         "projects/text2motion_cerebellum/assets/demo/walk-forward.mp4",
         "projects/text2motion_cerebellum/assets/demo/walk-forward.png",
+        "projects/nano_motion_cerebellum/assets/demo/self_motion_nano-motion-self-forward.mp4",
+        "projects/nano_motion_cerebellum/assets/demo/self_motion_nano-motion-self-forward.png",
+        "projects/nano_motion_cerebellum/assets/demo/self_motion_nano-motion-self-left.mp4",
+        "projects/nano_motion_cerebellum/assets/demo/self_motion_nano-motion-self-left.png",
+        "projects/nano_motion_cerebellum/assets/demo/self_motion_nano-motion-self-right.mp4",
+        "projects/nano_motion_cerebellum/assets/demo/self_motion_nano-motion-self-right.png",
     }
 
 
@@ -364,6 +384,7 @@ def load_tests(loader, tests, pattern):  # noqa: ARG001
         test_long_horizon_followup_matches_reports,
         test_compact_results_retain_source_provenance,
         test_public_submission_docs_do_not_contain_machine_credentials,
+        test_nano_motion_t2m_recipe_uses_valid_named_supervision,
         test_submission_allow_list_is_complete_and_scoped,
     ):
         suite.addTest(unittest.FunctionTestCase(function))

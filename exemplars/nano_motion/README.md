@@ -49,18 +49,9 @@ torchrun --nproc_per_node=2 --standalone -m exemplars.nano_motion.train_t2m para
 python -m exemplars.nano_motion.generate --ckpt exemplars/nano_motion/models/<run>/step_XXXXX
 ```
 
-For **text→motion**, steps 1–2 are replaced by downloading AMASS and HumanML3D by
-hand (both need an account) and the crop happens inside the encode:
-
-```bash
-python -m exemplars.nano_motion.data.download --check          # what is missing, and what it blocks
-python -m exemplars.nano_motion.data.encode --source humanml3d
-python -m exemplars.nano_motion.train_t2m source=humanml3d
-```
-
-LAFAN1 alone trains an unconditional motion model through the identical path.
-[data/README.md](data/README.md) covers both, what each costs, and the three details
-of the caption pairing that fail silently if you get them wrong.
+Text→motion needs captions, which means AMASS + HumanML3D and accepting their
+licenses; LAFAN1 alone trains an unconditional motion model through the identical
+path. [data/README.md](data/README.md) covers both and what each costs.
 
 ---
 
@@ -70,7 +61,7 @@ of the caption pairing that fail silently if you get them wrong.
 
 ```
 [  text band  |  control  |  motion band  ]
-   96786          ~30          512 codes
+   32768          18           512 codes
 ```
 
 `train_t2m.py` builds this from three manifests and derives every offset. The motion

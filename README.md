@@ -27,6 +27,7 @@ assembler and the same `Trainer`.
 | `exemplars/nano_motion/` | text → human motion: train the motion tokenizer, then a model that turns a caption into a moving skeleton. |
 | `projects/` | where your own work goes — a fork of an exemplar with one thing changed. |
 | `projects/text2motion_cerebellum/` | a Text2Motion → Motion Cerebellum demo that connects a pretrained OMG generator to a Unitree G1 motion tracker. |
+| `projects/nano_motion_cerebellum/` | the same G1 control path driven by a 140M `nano_motion` Text2Motion model trained with NanoInfra. |
 
 **Why three.** A framework that claims to be modality-agnostic and ships one modality
 has not been tested, it has been asserted. Video and motion do not resemble text and
@@ -47,13 +48,13 @@ Requires Python ≥ 3.12 and a CUDA GPU for training.
 
 ```bash
 # 1 · fetch a few FineWeb shards (into outputs/base_data/)
-python -m exemplars.text_pretrain.data.download_shards
+python exemplars/text_pretrain/data/download_shards.py
 
 # 2 · train YOUR tokenizer on those shards (seconds; writes outputs/tokenizer/)
 python -m modalities.text.train_tokenizer
 
 # 3 · train the model (see the exemplar README for the full train / measure / sample recipe)
-CUDA_VISIBLE_DEVICES=0 python -m exemplars.text_pretrain.pretrain
+CUDA_VISIBLE_DEVICES=0 python exemplars/text_pretrain/pretrain.py
 ```
 
 Yes, you train the tokenizer yourself — it's a from-scratch framework all the way
@@ -65,7 +66,7 @@ lifecycle — train → compute-optimal scaling law → inference — and
 [`RESULTS.md`](exemplars/text_pretrain/RESULTS.md) pins exactly what it produces.
 
 The other two start from their own data. `nano_world_model` downloads a public
-VizDoom recording (or records its own, if you install the game);  `nano_motion` runs
+VizDoom recording (or records its own, if you install the game); `nano_motion` runs
 on freely downloadable motion capture, and adds text conditioning if you accept the
 licences for AMASS and HumanML3D. Each has a `data/README.md` covering what to fetch,
 what it costs, and what will bite you.
@@ -97,13 +98,15 @@ artifacts). Set `NANOINFRA_BASE_DIR` to relocate `outputs/`.
 The model and training loop descend from Andrej Karpathy's
 [nanoGPT](https://github.com/karpathy/nanoGPT) / nanochat lineage.
 
-The Text2Motion → Motion Cerebellum project uses the
+The Text2Motion → Motion Cerebellum projects use the
 [`suning-git/motion_tracking`](https://github.com/suning-git/motion_tracking)
-controller and a pretrained OMG text-to-motion generator. Training data includes
-Motion Data by [Bones Studio](https://bones.studio/). Use of the underlying
-dataset is subject to the BONES Motion Capture Dataset License Agreement; raw
-data, checkpoints, and derived reference shards are not redistributed. Three
-compact skeleton comparison videos are included with the project demo.
+controller. The baseline uses a pretrained OMG generator; the extension trains
+NanoInfra's own `nano_motion` generator and compares both under the same frozen
+tracker protocol. Training data includes Motion Data by
+[Bones Studio](https://bones.studio/) and separately licensed HumanML3D/AMASS
+material. Raw data, checkpoints, codec weights, and derived reference shards are
+not redistributed. Compact skeleton comparison videos are included with both
+demos.
 
 ## License
 

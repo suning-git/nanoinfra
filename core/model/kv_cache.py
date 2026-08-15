@@ -137,6 +137,11 @@ class StaticKVCache:
         insert — otherwise the block attends to its own earlier guesses.
         """
         self.pos.sub_(n)
+        # Same justification as insert_kv's overflow assert: unchecked, a rewind past
+        # zero surfaces later as an anonymous device-side index assert that poisons
+        # the CUDA context. Async, so it costs no sync.
+        torch._assert_async((self.pos >= 0).all(),
+                            "StaticKVCache underflow: rewind past position 0")
 
     def insert_kv(self, layer_idx, k, v):
         # Overflow is checked on the DEVICE. KVCache can afford a Python assert because

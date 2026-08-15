@@ -1,0 +1,141 @@
+{
+  "conclusions": [
+    "the self-trained Text2Motion model completes the full text-to-G1-to-tracker interface",
+    "physical-margin selection repaired the original left-turn smoke failure",
+    "the formal three-policy-seed result is 30/36 successes and is not at OMG parity",
+    "future gains require broader tracker training coverage or better generator regularization, not more post-hoc sample reranking"
+  ],
+  "formal": {
+    "omg": {
+      "Empjpe_mm": 28.52018143466093,
+      "completion": 0.9974747474747474,
+      "episodes": 36,
+      "foot_slide": 4.748383019069192,
+      "jerk": 4.4671950226864965,
+      "success": 0.9444444444444444,
+      "success_wilson95": [
+        0.8185534279135275,
+        0.9846300133358382
+      ],
+      "successes": 34
+    },
+    "prior_nano_motion_demo": {
+      "Empjpe_mm": 45.77110551890987,
+      "completion": 0.9958071278825996,
+      "episodes": 36,
+      "foot_slide": 6.709953014323023,
+      "jerk": 5.201508714954483,
+      "success": 0.9444444444444444,
+      "success_wilson95": [
+        0.8185534279135275,
+        0.9846300133358382
+      ],
+      "successes": 34
+    },
+    "self_minus_omg": {
+      "Empjpe_mm": 20.636465105280895,
+      "completion": -0.021958148558758217,
+      "foot_slide": 2.206503832948523,
+      "jerk": 1.3935060207747574,
+      "success": -0.11111111111111105
+    },
+    "self_minus_prior_nano": {
+      "Empjpe_mm": 3.3855410210319548,
+      "completion": -0.020290528966610433,
+      "foot_slide": 0.2449338376946919,
+      "jerk": 0.6591923285067711,
+      "success": -0.11111111111111105
+    },
+    "self_trained_nano_motion": {
+      "Empjpe_mm": 49.156646539941825,
+      "completion": 0.9755165989159892,
+      "episodes": 36,
+      "foot_slide": 6.954886852017715,
+      "jerk": 5.860701043461254,
+      "success": 0.8333333333333334,
+      "success_wilson95": [
+        0.6810920568872054,
+        0.9212955240498188
+      ],
+      "successes": 30
+    }
+  },
+  "formal_protocol": {
+    "completion_floor": 0.85,
+    "observation_noise": true,
+    "reference_clips": [
+      "nano_motion_self_forward",
+      "nano_motion_self_left",
+      "nano_motion_self_right"
+    ],
+    "repeats": 4,
+    "required_success_clips": [
+      "nano_motion_self_left",
+      "nano_motion_self_right"
+    ],
+    "success_floor": 0.6666666666666666,
+    "tracker_commit": "a3b8d0c092684f1307c53175d94260c4ff323306",
+    "training_seeds": [
+      0,
+      1,
+      2
+    ]
+  },
+  "post_hoc_seed1_repeat16": {
+    "aggregate": {
+      "Eg_mpjpe": 142.19862369621404,
+      "Empjpe": 49.490164974295254,
+      "completion": 0.9622184112466124,
+      "foot_slide": 7.810437667888864,
+      "jerk": 6.124719821101312,
+      "succ": 0.6458333333333334
+    },
+    "by_prompt": {
+      "nano_motion_self_forward": {
+        "Eg_mpjpe": 164.95037617351477,
+        "Empjpe": 54.09462700583426,
+        "completion": 0.9674479166666666,
+        "foot_slide": 9.272573975102103,
+        "jerk": 6.69346716629882,
+        "succ": 0.9375
+      },
+      "nano_motion_self_left": {
+        "Eg_mpjpe": 122.38523733002515,
+        "Empjpe": 43.271744827963154,
+        "completion": 0.9512195121951219,
+        "foot_slide": 6.838414871019633,
+        "jerk": 5.162176295109358,
+        "succ": 0.4375
+      },
+      "nano_motion_self_right": {
+        "Eg_mpjpe": 139.26025758510218,
+        "Empjpe": 51.104123089088354,
+        "completion": 0.9679878048780488,
+        "foot_slide": 7.3203241575448565,
+        "jerk": 6.518516001895757,
+        "succ": 0.5625
+      }
+    },
+    "interpretation": "the low four-repeat seed-1 result persists with more repeats; this is a reference-distribution by tracker-seed interaction"
+  },
+  "reference_selection": {
+    "post_hoc": true,
+    "selected": {
+      "foot_slide": 3.79537473150283,
+      "g1_frames": 206,
+      "hover": 14.280625541299317,
+      "max_joint_speed_rad_s": 5.2788286209106445,
+      "physical_stress_max": 0.3519219080607096,
+      "physical_stress_mean": 0.3179385488373106,
+      "quality_gate_reason": "ok",
+      "result": "passed",
+      "root_displacement_m": 0.2655099332332611,
+      "seed": 16,
+      "semantic_score": 3.7660886450839928,
+      "stem": "seed_0016"
+    },
+    "uses_tracker_outcomes_for_candidate_ranking": false
+  },
+  "result": "completed_below_existing_baselines",
+  "schema": "nano-motion-self-trained-comparison-v2"
+}

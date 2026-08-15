@@ -1,0 +1,42 @@
+{
+  "schema": "nano-motion-motionhub-training-summary-v1",
+  "source": "ZeyuLing/MotionHub",
+  "source_revision": "c3f6c8eb8a4ba9e5ca521cdc0af9264756b66726",
+  "data": {
+    "train_clips": 9968,
+    "train_pairs": 29760,
+    "val_clips": 649,
+    "val_pairs": 1937,
+    "train_codec_rootrel_mpjpe_median_cm": 6.340536994668096,
+    "val_codec_rootrel_mpjpe_median_cm": 7.0744681773887645
+  },
+  "model": {
+    "approximate_parameters": 140000000,
+    "layers": 12,
+    "width": 768,
+    "heads": 12,
+    "sequence_length": 256,
+    "vocab_size": 33280
+  },
+  "validation_ce": {
+    "step_2500": 2.8315,
+    "step_3000": 2.8259,
+    "step_3500": 2.8751,
+    "step_5000": 3.1004
+  },
+  "selected_checkpoint": {
+    "step": 2500,
+    "fixed_seeds_per_prompt": 16,
+    "pass_rates": {
+      "forward": 0.75,
+      "left": 0.125,
+      "right": 0.25
+    },
+    "selection_rule": [
+      "maximize min(left_rate, right_rate)",
+      "maximize overall pass rate",
+      "minimize validation CE"
+    ],
+    "uses_tracker_outcomes": false
+  }
+}

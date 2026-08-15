@@ -40,7 +40,7 @@ anywhere. `reset()`/`finalize()` stay public for callers that need the halves ap
 and `reset()` refuses to open a backward whose predecessor was never closed.
 
 WHY THE HOOKS ARE ACCEPTABLE. Firing from `register_post_accumulate_grad_hook` is
-hidden state, which core/vision.md's "explicit over implicit" rightly dislikes: a bare
+hidden state, which core's "explicit over implicit" stance rightly dislikes: a bare
 `loss.backward()` gives no sign that collectives are being issued. Two things make it
 the right trade anyway. It is the only way to overlap at all — reducing after backward
 returns is the explicit version, and it is the version that gives up the speedup. And
@@ -296,8 +296,8 @@ class NanoDDP:
     # Issuing buckets in completion order instead of list order is silently wrong
     # whenever ranks have differently-shaped backwards (see _release). This attribute
     # exists ONLY so the gate that catches that bug can prove it still catches it:
-    # core/tests/integration/test_collective_order.py sets it to False for its positive control. It is not
-    # a constructor argument, because nothing in production should ever set it.
+    # the multi-GPU integration test sets it to False for its positive control. It is
+    # not a constructor argument, because nothing in production should ever set it.
     canonical_order = True
 
     _OWNER = "_nano_ddp_owner"               # marker left on parameters we hook

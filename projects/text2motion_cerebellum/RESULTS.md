@@ -220,3 +220,12 @@ The dependency-light tests cover the adapter contract, quaternion continuity,
 preregistered prompt accounting, source-stage attribution, and consistency
 between this report and the tracked result files. Full physics reruns require the
 external artifacts described in [`DATA_AND_LICENSES.md`](DATA_AND_LICENSES.md).
+
+## Self-trained generator extension
+
+[`projects/nano_motion_cerebellum`](../nano_motion_cerebellum/) replaces OMG with
+a 140M `nano_motion` model trained through NanoInfra. Under the same frozen
+three-tracker, four-repeat protocol, the self-trained system reached 30/36
+successes (83.3%), 97.6% completion, and 49.2 mm MPJPE. OMG reached 34/36
+(94.4%), 99.7%, and 28.5 mm. This establishes a complete self-trained
+Text2Motion-to-cerebellum demo while retaining OMG as the stronger baseline.

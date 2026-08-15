@@ -26,7 +26,7 @@ from modalities.assembler import build_layout
 from modalities.control import make_control_resolver
 from modalities.text import get_tokenizer
 
-from . import spec
+import spec
 
 
 def latest_ckpt():
