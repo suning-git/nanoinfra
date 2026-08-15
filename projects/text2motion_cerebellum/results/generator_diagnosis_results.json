@@ -13,8 +13,7 @@
   "frozen_output_attribution": {
     "selection_rule": "same nine frozen OMG outputs; no regeneration, reroll, or repair",
     "provenance": {
-      "source_artifact": "outputs/remote_text2motion_mainline/generator_stage_isolated_v2/diagnostic.json",
-      "source_sha256": "76473b4c447f56a213c62986a9dd1f33e2dc9a2ad08a43bc5860245be60673e6"
+      "source_artifact": "outputs/remote_text2motion_mainline/generator_stage_isolated_v2/diagnostic.json"
     },
     "quality_passed": 3,
     "quality_rejected": 6,
@@ -80,8 +79,7 @@
   "documented_chunk_experiment": {
     "classification": "exploratory_post_hoc",
     "provenance": {
-      "source_artifact": "outputs/remote_text2motion_mainline/generation_chunk_experiment_v3/result.json",
-      "source_sha256": "536aec56be90e89d365356e0947988a878ad036c94362cd35043ba667fdb6be7"
+      "source_artifact": "outputs/remote_text2motion_mainline/generation_chunk_experiment_v3/result.json"
     },
     "omg_commit": "61e196010b332acbace223b2c449e25f454ea0a3",
     "model": "OMG 50M ONNX",

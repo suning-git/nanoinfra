@@ -1,8 +1,7 @@
 {
   "schema": "text2motion-cerebellum-submission-results-v1",
   "provenance": {
-    "source_artifact": "outputs/remote_text2motion_mainline/clean_multiseed_v1/multiseed_summary.json",
-    "source_sha256": "b69e060b7194cbdda2646df2060dec896ad4c6998b69ac8f8c3fe4b81d101e3c"
+    "source_artifact": "outputs/remote_text2motion_mainline/clean_multiseed_v1/multiseed_summary.json"
   },
   "protocol": {
     "available_training_clips": 1694,

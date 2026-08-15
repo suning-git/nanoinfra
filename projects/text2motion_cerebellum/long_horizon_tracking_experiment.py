@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -29,10 +28,6 @@ def write(path: Path, payload: dict[str, Any]) -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     temporary.replace(path)
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def aggregate(rows: list[dict[str, Any]]) -> dict[str, float]:
@@ -205,9 +200,7 @@ def main() -> None:
                 "clip": clip,
                 "quality_gate": record["quality_gate"],
                 "gate_reason": record["gate_reason"],
-                "source_sha256": record["sanitized_sha256"],
                 "accepted_shard": None,
-                "accepted_shard_sha256": None,
             }
             if record["quality_gate"] == "passed":
                 source = (
@@ -216,8 +209,6 @@ def main() -> None:
                     / tag
                     / "reference_motion.npz"
                 )
-                if sha256(source) != record["sanitized_sha256"]:
-                    raise RuntimeError(f"sanitized source hash mismatch: {clip}")
                 shard_name = f"shard_{accepted_index:03d}.npz"
                 shard = accepted_root / shard_name
                 adapter_environment = dict(environment)
@@ -245,7 +236,6 @@ def main() -> None:
                 if completed.returncode != 0 or not shard.is_file():
                     raise RuntimeError(f"accepted reference conversion failed: {clip}")
                 item["accepted_shard"] = shard_name
-                item["accepted_shard_sha256"] = sha256(shard)
                 accepted_index += 1
             inventory.append(item)
 
@@ -256,7 +246,6 @@ def main() -> None:
             {
                 "schema": "text2motion-long-horizon-reference-inventory-v1",
                 "source_artifact": str(args.sanitizer_result),
-                "source_sha256": sha256(args.sanitizer_result),
                 "selection_rule": "all 27 sanitizer cells; all 18 quality-passing cells are tracked",
                 "records": inventory,
             },

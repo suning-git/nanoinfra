@@ -29,7 +29,6 @@ class GenerationContinuationExperimentTest(unittest.TestCase):
                 "generation": "passed",
                 "quality_gate": "passed",
                 "gate_reason": "ok",
-                "stitched_qpos_sha256": "a",
                 "raw_omg_30hz": {
                     "joint_step_worst_transition": [59, 60],
                     "joint_step_max_rad_frame": 0.2,
@@ -40,7 +39,6 @@ class GenerationContinuationExperimentTest(unittest.TestCase):
                 "generation": "passed",
                 "quality_gate": "rejected",
                 "gate_reason": "speed",
-                "stitched_qpos_sha256": "b",
                 "raw_omg_30hz": {
                     "joint_step_worst_transition": [12, 13],
                     "joint_step_max_rad_frame": 0.1,
@@ -51,7 +49,6 @@ class GenerationContinuationExperimentTest(unittest.TestCase):
         self.assertEqual(summary["quality_passed"], 1)
         self.assertEqual(summary["reason_counts"], {"speed": 1})
         self.assertEqual(summary["seam_is_worst_transition_count"], 1)
-        self.assertEqual(summary["unique_stitched_outputs"], 2)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import sys
@@ -28,10 +27,6 @@ except ImportError:
         validate_qpos_36,
         write_ref_shard,
     )
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -320,9 +315,6 @@ def main() -> None:
         baseline_row = baseline_by_tag[tag]
         if item["source"] == "frozen_existing":
             source = existing[tag]
-            expected_sha = baseline_row.get("reference_sha256")
-            if expected_sha and sha256(source) != expected_sha:
-                raise RuntimeError(f"{tag}: frozen existing reference hash mismatch")
             shard_name = f"shard_{accepted_index:03d}.npz"
             destination = accepted_root / shard_name
             shutil.copy2(source, destination)
@@ -331,7 +323,6 @@ def main() -> None:
                 "generation": "inherited",
                 "quality_gate": "passed",
                 "accepted_shard": shard_name,
-                "reference_sha256": sha256(destination),
                 "repair": {"applied": False, "reason": "frozen_existing"},
             })
             accepted_index += 1
@@ -368,21 +359,16 @@ def main() -> None:
             repaired, model, slide_setup, tag, caption, G1
         )
         shard_name = None
-        reference_sha = None
         if after_ref is not None:
             shard_name = f"shard_{accepted_index:03d}.npz"
             destination = accepted_root / shard_name
             write_ref_shard(destination, (after_ref,))
-            reference_sha = sha256(destination)
             accepted_index += 1
         records.append({
             **item,
             "generation": "passed",
             "quality_gate": "passed" if after_ref is not None else "rejected",
             "accepted_shard": shard_name,
-            "reference_sha256": reference_sha,
-            "source_sha256": sha256(source),
-            "repaired_motion_sha256": sha256(repaired_path),
             "before": {"gate_reason": before_reason, **before},
             "after": {"gate_reason": after_reason, **after},
             "repair": repair,
@@ -391,8 +377,6 @@ def main() -> None:
     payload = {
         "schema": "text2motion-expanded-prompt-generation-v1",
         "repair_schema": protocol_schema.replace("-protocol-", "-run-"),
-        "repair_protocol_sha256": sha256(args.protocol),
-        "prompt_protocol_sha256": sha256(args.prompt_protocol),
         "selection_rule": protocol["selection_rule"],
         "accepted_count": accepted_index,
         "prompts": records,

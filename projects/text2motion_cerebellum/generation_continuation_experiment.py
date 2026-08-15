@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import os
 import subprocess
@@ -30,15 +29,6 @@ def write(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
-
-
-def array_sha256(value: np.ndarray) -> str:
-    array = np.ascontiguousarray(value)
-    digest = hashlib.sha256()
-    digest.update(str(array.dtype).encode("ascii"))
-    digest.update(str(array.shape).encode("ascii"))
-    digest.update(array.tobytes())
-    return digest.hexdigest()
 
 
 def stitch_arrays(first: np.ndarray, second: np.ndarray, overlap: int) -> np.ndarray:
@@ -72,9 +62,6 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             "seam_is_worst_transition_count": len(seam_steps),
             "seam_worst_step_mean_rad_frame": (
                 float(np.mean(seam_steps)) if seam_steps else None
-            ),
-            "unique_stitched_outputs": len(
-                {row["stitched_qpos_sha256"] for row in rows if "stitched_qpos_sha256" in row}
             ),
         }
     return summaries
@@ -156,7 +143,6 @@ def main() -> None:
                 num_frames=planner.sequence_length,
             )
             state_after_first = copy.deepcopy(planner.rng.bit_generator.state)
-            first_qpos_sha256 = array_sha256(first.qpos_36)
             current_seed_qpos = np.concatenate(
                 [seed_qpos, first.qpos_36], axis=0
             )[-planner.num_prev_states :]
@@ -169,13 +155,11 @@ def main() -> None:
                     "generation_seed": generation_seed,
                     "tag": tag,
                     "text": text,
-                    "first_chunk_qpos_sha256": first_qpos_sha256,
                 }
                 try:
                     if config["chunks"] == 1:
                         stitched_qpos = first.qpos_36
                         stitched_features = first.motion_features
-                        second_qpos_sha256 = None
                     else:
                         overlap = int(config["overlap"])
                         continuation_steps = int(config["continuation_steps"])
@@ -194,7 +178,6 @@ def main() -> None:
                         stitched_features = stitch_arrays(
                             first.motion_features, second.motion_features, overlap
                         )
-                        second_qpos_sha256 = array_sha256(second.qpos_36)
 
                     output_dir = (
                         args.out
@@ -222,8 +205,6 @@ def main() -> None:
                         {
                             "generation": "passed",
                             "frames": int(len(stitched_qpos)),
-                            "second_chunk_qpos_sha256": second_qpos_sha256,
-                            "stitched_qpos_sha256": array_sha256(stitched_qpos),
                         }
                     )
                     probe_out = args.out / "probes" / variant_name / f"seed_{generation_seed}" / f"{tag}.json"

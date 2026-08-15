@@ -15,8 +15,7 @@
   },
   "continuation_preflight": {
     "provenance": {
-      "source_artifact": "outputs/remote_text2motion_mainline/continuation_preflight_v2/result.json",
-      "source_sha256": "89a993ffce5be109c944d846b4aaccd16b7474d7d787bcf1df60e2c463cc80ae"
+      "source_artifact": "outputs/remote_text2motion_mainline/continuation_preflight_v2/result.json"
     },
     "scope": "jog, both-arms raise, and right-leg kick; generation seeds 0, 1, and 2",
     "baseline_quality_passed": 0,
@@ -45,8 +44,7 @@
   },
   "single_vs_double_multiseed": {
     "provenance": {
-      "source_artifact": "outputs/remote_text2motion_mainline/single_vs_double_multiseed_v1/result.json",
-      "source_sha256": "1817fca5d1a24b61ff398b1d917320254a241b6c5d97da7a788ee845ce9a3efe"
+      "source_artifact": "outputs/remote_text2motion_mainline/single_vs_double_multiseed_v1/result.json"
     },
     "single_60": {
       "quality_passed": 21,
@@ -81,28 +79,23 @@
     },
     "provenance": {
       "inventory": {
-        "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/inventory.json",
-        "source_sha256": "bb83c9c09ff6c7c27eeaf11f448b40d582f27f46f009b245fb868d84603b4eec"
+        "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/inventory.json"
       },
       "summary": {
-        "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/summary.json",
-        "source_sha256": "176f6dc82ae7264633265f526465c0d1cb5b300e07f357708fe74c88d8d84b11"
+        "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/summary.json"
       },
       "episode_files": [
         {
           "training_seed": 0,
-          "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/seed0_episodes.json",
-          "source_sha256": "228b05185e673c41db61bea93caa2507498dca63dd7235f0cc47fff03f9b8fd1"
+          "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/seed0_episodes.json"
         },
         {
           "training_seed": 1,
-          "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/seed1_episodes.json",
-          "source_sha256": "5acf15c68d1f55fce02489e70bbff4fdfe21548cd77aca742d30837a193ac884"
+          "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/seed1_episodes.json"
         },
         {
           "training_seed": 2,
-          "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/seed2_episodes.json",
-          "source_sha256": "f09701b66fb4e47741f596a93a24e2a5aa98346936cbcbcef81deda5ce9006e2"
+          "source_artifact": "outputs/remote_text2motion_mainline/single_chunk_tracking_v2/seed2_episodes.json"
         }
       ]
     },

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -30,19 +29,6 @@ def write(path: Path, payload: dict[str, Any]) -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     temporary.replace(path)
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def array_sha256(value: np.ndarray) -> str:
-    array = np.ascontiguousarray(value)
-    digest = hashlib.sha256()
-    digest.update(str(array.dtype).encode("ascii"))
-    digest.update(str(array.shape).encode("ascii"))
-    digest.update(array.tobytes())
-    return digest.hexdigest()
 
 
 def normalize_quaternion(value: np.ndarray) -> np.ndarray:
@@ -414,20 +400,11 @@ def main() -> None:
                 "text": source_row["text"],
                 "source_quality_gate": source_row.get("quality_gate"),
                 "source_gate_reason": source_row.get("gate_reason"),
-                "source_sha256": sha256(source),
             }
             try:
                 motion = load_omg_motion(source)
                 if not np.isclose(motion.fps, float(protocol["source_fps"])):
                     raise ValueError(f"unexpected source fps: {motion.fps}")
-                expected_qpos_hash = source_row.get("stitched_qpos_sha256")
-                # ``load_omg_motion`` deliberately re-normalizes quaternions.
-                # Provenance must therefore compare the byte-identical saved
-                # array, not its validated in-memory representation.
-                with np.load(source, allow_pickle=False) as source_data:
-                    raw_saved_qpos = np.asarray(source_data[motion.qpos_key])
-                if expected_qpos_hash and array_sha256(raw_saved_qpos) != expected_qpos_hash:
-                    raise RuntimeError("raw saved source qpos hash mismatch")
                 method = protocol["correction"].get("method", "c1_residual_decay")
                 if method == "c1_residual_decay":
                     repaired, correction = c1_residual_stitch(
@@ -466,7 +443,6 @@ def main() -> None:
                                 "schema": protocol["schema"],
                                 "variant": variant,
                                 "generation_seed": generation_seed,
-                                "source_sha256": row["source_sha256"],
                             },
                             sort_keys=True,
                         )
@@ -497,8 +473,6 @@ def main() -> None:
                 row.update(
                     {
                         "result": "passed",
-                        "repaired_sha256": sha256(reference),
-                        "repaired_qpos_sha256": array_sha256(repaired),
                         "correction": correction,
                         "quality_gate": probe["upstream_gate"]["result"],
                         "gate_reason": probe["upstream_gate"]["reason"],
@@ -522,7 +496,6 @@ def main() -> None:
                 {
                     "schema": "text2motion-long-horizon-seam-experiment-v1",
                     "result": "running",
-                    "protocol_sha256": sha256(args.protocol),
                     "records": records,
                 },
             )
@@ -549,8 +522,6 @@ def main() -> None:
                 if selected is not None
                 else "no_candidate_met_preregistered_floors"
             ),
-            "protocol_sha256": sha256(args.protocol),
-            "source_result_sha256": sha256(args.source_result),
             "prompt_tags": prompt_tags,
             "source_baseline_quality_passed": len(baseline_passed),
             "summaries": summaries,

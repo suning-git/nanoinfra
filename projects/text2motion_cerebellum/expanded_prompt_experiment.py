@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -17,10 +16,6 @@ import numpy as np
 
 
 OMG_COMMIT = "61e196010b332acbace223b2c449e25f454ea0a3"
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def run(command: list[str], log, env: dict[str, str]) -> bool:
@@ -180,12 +175,10 @@ def main() -> None:
                 else:
                     generation = "failed"
             accepted_shard = None
-            reference_sha = None
             if quality_gate == "passed":
                 accepted_shard = f"shard_{accepted_index:03d}.npz"
                 accepted_path = accepted_root / accepted_shard
                 shutil.copy2(candidate, accepted_path)
-                reference_sha = sha256(accepted_path)
                 accepted_index += 1
             records.append(
                 {
@@ -193,13 +186,11 @@ def main() -> None:
                     "generation": generation,
                     "quality_gate": quality_gate,
                     "accepted_shard": accepted_shard,
-                    "reference_sha256": reference_sha,
                 }
             )
 
         prompt_status = {
             "schema": "text2motion-expanded-prompt-generation-v1",
-            "protocol_sha256": sha256(args.protocol),
             "selection_rule": protocol["selection_rule"],
             "omg_commit": OMG_COMMIT,
             "prompts": records,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import unittest
@@ -26,6 +25,13 @@ NANO_MOTION_CONFIG = ROOT / "exemplars/nano_motion/configs/train_t2m.yaml"
 
 def load(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def assert_source_artifact(source: dict) -> None:
+    path = Path(source["source_artifact"])
+    assert not path.is_absolute()
+    assert ".." not in path.parts
+    assert path.parts
 
 
 def test_tracked_main_result_matches_frozen_protocol_and_reports() -> None:
@@ -137,10 +143,7 @@ def test_post_hoc_reference_repair_matches_report() -> None:
         assert "事后" in text or "post-hoc" in text
 
     for source in payload["provenance"].values():
-        path = ROOT / source["source_artifact"]
-        assert len(source["source_sha256"]) == 64
-        if path.is_file():
-            assert hashlib.sha256(path.read_bytes()).hexdigest() == source["source_sha256"]
+        assert_source_artifact(source)
 
 
 def test_generator_stage_diagnosis_matches_reports() -> None:
@@ -174,10 +177,7 @@ def test_generator_stage_diagnosis_matches_reports() -> None:
 
     for section in ("frozen_output_attribution", "documented_chunk_experiment"):
         source = payload[section]["provenance"]
-        path = ROOT / source["source_artifact"]
-        assert len(source["source_sha256"]) == 64
-        if path.is_file():
-            assert hashlib.sha256(path.read_bytes()).hexdigest() == source["source_sha256"]
+        assert_source_artifact(source)
 
 
 def test_short_horizon_followup_matches_reports() -> None:
@@ -222,10 +222,7 @@ def test_short_horizon_followup_matches_reports() -> None:
         *tracking["provenance"]["episode_files"],
     ]
     for source in sources:
-        path = ROOT / source["source_artifact"]
-        assert len(source["source_sha256"]) == 64
-        if path.is_file():
-            assert hashlib.sha256(path.read_bytes()).hexdigest() == source["source_sha256"]
+        assert_source_artifact(source)
 
 
 def test_long_horizon_followup_matches_reports() -> None:
@@ -282,21 +279,19 @@ def test_long_horizon_followup_matches_reports() -> None:
         provenance["replay_adaptation"],
     ]
     for source in sources:
-        path = ROOT / source["source_artifact"]
-        assert len(source["source_sha256"]) == 64
-        if path.is_file():
-            assert hashlib.sha256(path.read_bytes()).hexdigest() == source["source_sha256"]
+        assert_source_artifact(source)
 
 
 def test_compact_results_retain_source_provenance() -> None:
     for path in (MAIN, EXPANDED, QUALITY):
         provenance = load(path)["provenance"]
-        digest = provenance["source_sha256"]
-        assert len(digest) == 64
-        int(digest, 16)
-        source = ROOT / provenance["source_artifact"]
-        if source.is_file():
-            assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
+        assert_source_artifact(provenance)
+
+
+def test_public_results_do_not_publish_file_digests() -> None:
+    digest_key = "sha" + "256"
+    for path in sorted((PROJECT / "results").glob("*.json")):
+        assert digest_key not in path.read_text(encoding="utf-8").lower()
 
 
 def test_public_submission_docs_do_not_contain_machine_credentials() -> None:

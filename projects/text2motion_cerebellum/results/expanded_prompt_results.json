@@ -1,8 +1,7 @@
 {
   "schema": "text2motion-cerebellum-expanded-prompt-results-v1",
   "provenance": {
-    "source_artifact": "outputs/remote_text2motion_mainline/expanded_prompts_v1/summary.json",
-    "source_sha256": "0a7ba719930651832f2fc1b17c75d81ea305faf31ed9be507e7b4a86b568d515"
+    "source_artifact": "outputs/remote_text2motion_mainline/expanded_prompts_v1/summary.json"
   },
   "protocol": {
     "total_preregistered_prompts": 12,

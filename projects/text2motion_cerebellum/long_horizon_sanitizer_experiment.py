@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from collections import Counter
@@ -37,10 +36,6 @@ def write(path: Path, payload: dict[str, Any]) -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     temporary.replace(path)
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def ground_align_to_sole(
@@ -248,7 +243,6 @@ def main() -> None:
                     {
                         "schema": protocol["schema"],
                         "generation_seed": generation_seed,
-                        "source_sha256": sha256(source),
                         "operations": operations,
                     },
                     sort_keys=True,
@@ -260,8 +254,6 @@ def main() -> None:
                 "generation_seed": generation_seed,
                 "tag": tag,
                 "text": text,
-                "source_sha256": sha256(source),
-                "sanitized_sha256": sha256(destination),
                 "source_quality_gate": replayed_source_result,
                 "source_gate_reason": before_reason,
                 "quality_gate": "passed" if after_ref is not None else "rejected",
@@ -276,7 +268,6 @@ def main() -> None:
             {
                 "schema": "text2motion-long-horizon-sanitizer-experiment-v1",
                 "result": "running",
-                "protocol_sha256": sha256(args.protocol),
                 "records": records,
             },
         )
@@ -291,8 +282,6 @@ def main() -> None:
                 if summary["eligible_for_tracking"]
                 else "not_eligible_for_tracking"
             ),
-            "protocol_sha256": sha256(args.protocol),
-            "source_result_sha256": sha256(args.source_result),
             "summary": summary,
             "records": records,
         },

@@ -3,20 +3,16 @@
   "phase": "post_hoc_followup_after_preregistered_stress_test",
   "provenance": {
     "v1_comparison": {
-      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v1/comparison.json",
-      "source_sha256": "5e67a8c81a058375d5dd946432d4874f8eb2babbb87c8cfa14a0efcd035ffaf2"
+      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v1/comparison.json"
     },
     "v1_summary": {
-      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v1/summary.json",
-      "source_sha256": "974333f6bf1a7e2be64c626546b3e400736838750fa4ddf532ba104b3612e257"
+      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v1/summary.json"
     },
     "v2_comparison": {
-      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v2/comparison.json",
-      "source_sha256": "ba68285151dc86d8cddbfb13db4049f8640b6f48f22b9e6b2bf09d8253f622bc"
+      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v2/comparison.json"
     },
     "v2_summary": {
-      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v2/summary.json",
-      "source_sha256": "c151c284a3ed0035ebfe6df6e6aaf5a6bdade8792ddf36e4924a37d37a182968"
+      "source_artifact": "outputs/remote_text2motion_mainline/reference_repair_v2/summary.json"
     }
   },
   "protocol_invariants": {

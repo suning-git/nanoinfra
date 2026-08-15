@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from collections import Counter
@@ -23,10 +22,6 @@ JOINT_SPEED_LIMIT = 15.0
 JOINT_STEP_LIMIT_AT_50HZ = 0.5
 FOOT_SLIDE_LIMIT_AT_50HZ = 12.0
 HOVER_LIMIT = 50.0
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def stage_kinematics(qpos: np.ndarray, fps: float) -> dict[str, Any]:
@@ -105,7 +100,6 @@ def diagnose_one(source: Path, tracker_repo: Path, tag: str) -> dict[str, Any]:
 
     return {
         "tag": tag,
-        "source_sha256": sha256(source),
         "source_contract": {
             "qpos_key": motion.qpos_key,
             "shape": list(validated.shape),

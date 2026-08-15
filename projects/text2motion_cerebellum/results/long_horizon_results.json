@@ -136,55 +136,44 @@
   },
   "provenance": {
     "raw_two_chunk_baseline": {
-      "source_artifact": "projects/text2motion_cerebellum/results/short_horizon_results.json",
-      "source_sha256": "9303a4886086acddba790dd53dabfc6fe49f1c0c7b0c85b631d11931db1b3673"
+      "source_artifact": "projects/text2motion_cerebellum/results/short_horizon_results.json"
     },
     "unconstrained_c1": {
-      "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_seam_v2/result.json",
-      "source_sha256": "73e5312824d1bf626070bd46f7e8fd88e2550173e0f1d8824908a42703427117"
+      "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_seam_v2/result.json"
     },
     "space_aligned_c1": {
-      "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_space_seam_v1/result.json",
-      "source_sha256": "245a6252dd5f90c803dc66f6fea4c3c90cb263d4d485869205b5f5064282c0d3"
+      "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_space_seam_v1/result.json"
     },
     "sanitizer": {
-      "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_sanitizer_v1/result.json",
-      "source_sha256": "1e088d45e4fbc2f3a3d73eed245948c6aba28c9fe5d20c965d501ac93e9cbb9d"
+      "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_sanitizer_v1/result.json"
     },
     "tracking": {
       "inventory": {
-        "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_tracking_v1/inventory.json",
-        "source_sha256": "1817aa6ce618c80e4d8b8132584ae64a89ba612a3cbdbc06911943d791394b37"
+        "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_tracking_v1/inventory.json"
       },
       "summary": {
-        "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_tracking_v1/summary.json",
-        "source_sha256": "a7bf475ffa921cdb72c2d194a40043539b53ed1a15bb6f9ddf5faf4125ca65fb"
+        "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_tracking_v1/summary.json"
       },
       "episode_files": [
         {
           "training_seed": 0,
-          "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_tracking_v1/seed0_episodes.json",
-          "source_sha256": "f402f3e645b0a37c9c2db05eaff3ef7cd423ca7a103a467d8fe78f54b3a26541"
+          "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_tracking_v1/seed0_episodes.json"
         },
         {
           "training_seed": 1,
-          "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_tracking_v1/seed1_episodes.json",
-          "source_sha256": "b4b777f0eee61a32a4ef58cd8afbad32df6459e1aaff36edb34016361a662aea"
+          "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_tracking_v1/seed1_episodes.json"
         },
         {
           "training_seed": 2,
-          "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_tracking_v1/seed2_episodes.json",
-          "source_sha256": "af0cf764d05798eb741930697e16859c7ff7c3920fa32fbc96b0d8926d2778a1"
+          "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_tracking_v1/seed2_episodes.json"
         }
       ]
     },
     "long_only_adaptation": {
-      "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_adapt_smoke_v1/review.json",
-      "source_sha256": "91b60f16dca0b2e5c475f8fa70f5041802babeddbd66a3652c9ec61f8a11b52b"
+      "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_adapt_smoke_v1/review.json"
     },
     "replay_adaptation": {
-      "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_adapt_smoke_replay_v1/review.json",
-      "source_sha256": "c0b1fbc4069e587a85015d0341756c41cf857b9f3bfb84e54e08c3f16162e6aa"
+      "source_artifact": "outputs/remote_text2motion_mainline/long_horizon_adapt_smoke_replay_v1/review.json"
     }
   }
 }
