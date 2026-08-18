@@ -1,0 +1,36 @@
+{
+  "schema": "text2motion-long-horizon-seam-protocol-v2",
+  "classification": "post_hoc_generator_interface_followup",
+  "source_variant": "baseline_two_chunks",
+  "source_generation_seeds": [0, 1, 2],
+  "development_generation_seeds": [0, 1],
+  "holdout_generation_seeds": [2],
+  "selection_rule": "evaluate every frozen prompt/seed cell once; rank candidates on development seeds by quality-pass count, then correction RMS, then shorter horizon; report the selected candidate only if all preregistered development, holdout, overall, and preservation floors pass",
+  "rerolls": 0,
+  "prompt_specific_tuning": false,
+  "boundary_frame": 60,
+  "source_fps": 30.0,
+  "correction": {
+    "method": "planar_space_aligned_selective_c1",
+    "root_xy_and_yaw": "apply one rigid horizontal-frame transform to the entire second chunk",
+    "root_z": "apply C1 decay only when the seam displacement exceeds 0.05 m",
+    "joints": "apply C1 decay per channel only when seam displacement exceeds 0.5 rad or seam velocity residual exceeds 0.15 rad/frame",
+    "maximum_joint_velocity_residual_rad_frame": 0.1,
+    "maximum_root_z_velocity_residual_m_frame": 0.03,
+    "first_chunk_modified": false
+  },
+  "candidates": {
+    "se2_c1_decay_15": {"decay_frames": 15},
+    "se2_c1_decay_30": {"decay_frames": 30},
+    "se2_c1_decay_45": {"decay_frames": 45}
+  },
+  "acceptance": {
+    "minimum_development_quality_passed": 12,
+    "development_total": 18,
+    "minimum_holdout_quality_passed": 6,
+    "holdout_total": 9,
+    "minimum_overall_quality_passed": 18,
+    "overall_total": 27,
+    "preserve_every_baseline_passing_cell": true
+  }
+}

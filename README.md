@@ -26,6 +26,8 @@ assembler and the same `Trainer`.
 | `exemplars/nano_world_model/` | a video world model: VizDoom as discrete tokens, trained either autoregressively or with block diffusion over one pipeline, and decoded at ~1.1 ms/token. |
 | `exemplars/nano_motion/` | text → human motion: train the motion tokenizer, then a model that turns a caption into a moving skeleton. |
 | `projects/` | where your own work goes — a fork of an exemplar with one thing changed. |
+| `projects/text2motion_cerebellum/` | a Text2Motion → Motion Cerebellum demo that connects a pretrained OMG generator to a Unitree G1 motion tracker. |
+| `projects/nano_motion_cerebellum/` | the same G1 control path driven by a 140M `nano_motion` Text2Motion model trained with NanoInfra. |
 
 **Why three.** A framework that claims to be modality-agnostic and ships one modality
 has not been tested, it has been asserted. Video and motion do not resemble text and
@@ -95,6 +97,16 @@ artifacts). Set `NANOINFRA_BASE_DIR` to relocate `outputs/`.
 
 The model and training loop descend from Andrej Karpathy's
 [nanoGPT](https://github.com/karpathy/nanoGPT) / nanochat lineage.
+
+The Text2Motion → Motion Cerebellum projects use the
+[`suning-git/motion_tracking`](https://github.com/suning-git/motion_tracking)
+controller. The baseline uses a pretrained OMG generator; the extension trains
+NanoInfra's own `nano_motion` generator and compares both under the same frozen
+tracker protocol. Training data includes Motion Data by
+[Bones Studio](https://bones.studio/) and separately licensed HumanML3D/AMASS
+material. Raw data, checkpoints, codec weights, and derived reference shards are
+not redistributed. Compact skeleton comparison videos are included with both
+demos.
 
 ## License
 
