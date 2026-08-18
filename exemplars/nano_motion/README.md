@@ -61,7 +61,7 @@ path. [data/README.md](data/README.md) covers both and what each costs.
 
 ```
 [  text band  |  control  |  motion band  ]
-   32768          18           512 codes
+   32750          18           512 codes
 ```
 
 `train_t2m.py` builds this from three manifests and derives every offset. The motion
