@@ -7,16 +7,22 @@ the F action ids that drove it — so everything downstream is source-blind:
 
     parquet   downloaded a16z shards; rows are 10-frame sliding windows that chain
               within an episode, so longer clips are stitched from them
-    recorded  data/record.py's shards; whole episodes, windows cut here
+    recorded  data/record/'s pixel shards; whole episodes, windows cut here
 
 Output is what build_cache.py reads:
 
-    datasets/nano_world_model/codes/<shard>.npz        train rows
-    datasets/nano_world_model/codes/<shard>_val.npz    frozen val rows
-    datasets/nano_world_model/manifest.jsonl           one line per encoded shard
+    datasets/nano_world_model/codes/<shard>_<F>f.npz        train rows
+    datasets/nano_world_model/codes/<shard>_<F>f_val.npz    frozen val rows
+    datasets/nano_world_model/manifest.jsonl                one line per encoded file
+
+The clip length is IN THE NAME because one pixel shard is encoded once per clip
+length you train at (17f for the quickstart, 129f for the long-window run), and
+the two are different files with different row widths. Cosmos is only ~90%
+prefix-invariant, so a 129-frame encoding cannot be sliced down to 17-frame rows
+— each length is encoded from its own windows.
 
 Each npz holds `codes` [rows, code_len] uint16 and `actions` [rows, frames] uint8.
-The manifest line records the geometry, so build_cache.py never has to guess what a
+The manifest line records the shape contract, so build_cache.py never has to guess what a
 file contains — see the note there about caches of different geometries colliding.
 
 TWO THINGS THIS FILE IS CAREFUL ABOUT, both easy to get wrong when re-targeting:
@@ -35,8 +41,9 @@ Run:
     python -m exemplars.nano_world_model.data.encode --limit 200     # a quick taste
     python -m exemplars.nano_world_model.data.encode --source recorded
 
-Re-runnable: shards already in the manifest are skipped, so an interrupted encode
-resumes by re-running it.
+Re-runnable: files already in the manifest are skipped, so an interrupted encode
+resumes by re-running it — and asking for a second clip length re-reads the same
+pixels rather than skipping them, because the manifest key carries the length.
 """
 
 import argparse
@@ -108,7 +115,7 @@ def parquet_clips(path, frames, res, stride):
       * clips never span a gap, because the frames across a gap are seconds apart and
         nothing connects them;
       * a clip longer than the longest run cannot be cut from this data AT ALL. The
-        default 17-frame geometry fits comfortably; a 129-frame one does not, and no
+        default 17-frame contract fits comfortably; a 129-frame one does not, and no
         amount of downloading fixes that. Record your own (data/record.py) for those.
     """
     import pyarrow.parquet as pq
@@ -144,41 +151,50 @@ def parquet_clips(path, frames, res, stride):
                     im, ac = by_step[st]
                     clip.append(_decode_png(im[k], res))
                     acts.append(ac[k])
-                yield np.stack(clip), np.asarray(acts, np.uint8), key
+                yield np.stack(clip), np.asarray(acts, np.uint8), split_of(key)
 
 
 # --- source 2: our own recordings --------------------------------------------
 
 def recorded_clips(path, frames, res, stride):
-    """Yield (clip, actions, run_key) from one shard written by data/record.py.
+    """Yield (clip, actions, split) from one pixel shard written by data/record/.
 
-    Pixels are a raw uint8 memmap (no per-frame decode) and episodes are stored whole,
-    so windowing is a slice and one episode is one run. This is the cheap source; the
-    parquet one above pays for PNG decoding on every frame of every clip.
+    Pixels are a raw uint8 memmap (no per-frame decode); the durable twin is the
+    sidecar npz, which carries the action stream, the episode table — and the
+    split: the recorder marks every Nth EPISODE val at record time (recipe
+    `val.episode_every`), which is episode holdout by construction. The parquet
+    source cannot have that (nobody marked it), hence its run-hash fallback.
+
+    Frames are native 240x320 and clips are resized to (res, res) with the same
+    BILINEAR call the parquet path uses — the codec sees one byte path.
     """
-    meta = np.load(str(path).replace(".bin", "_meta.npz"))
-    actions, episode_id = meta["actions"], meta["episode_id"]
-    h = w = int(meta["res"])
+    from PIL import Image
+    name = Path(path).stem
+    sc = np.load(spec.SIDECAR_DIR / f"{name}_sc.npz", allow_pickle=True)
+    actions, episode_id = sc["actions"], sc["episode_id"]
+    h, w = int(sc["h"]), int(sc["w"])
     px = np.memmap(path, dtype=np.uint8, mode="r").reshape(-1, h, w, 3)
     assert len(px) == len(actions), f"{path}: {len(px)} frames vs {len(actions)} actions"
+    ep_val = dict(zip(sc["episodes"].tolist(), sc["ep_val"].tolist()))
 
     for ep in np.unique(episode_id):
-        idx = np.where(episode_id == ep)[0]
-        key = f"{Path(path).stem}/{ep}/0"          # unbroken episode = one run
+        idx = np.nonzero(episode_id == ep)[0]
+        assert (np.diff(idx) == 1).all(), f"episode {ep} not contiguous in shard"
+        split = "val" if ep_val.get(int(ep), False) else "train"
         for i in range(0, len(idx) - frames + 1, stride):
             sl = idx[i:i + frames]
-            clip = px[sl]
-            if h != res:
-                from PIL import Image
-                clip = np.stack([np.asarray(Image.fromarray(f).resize((res, res),
-                                 Image.BILINEAR), np.uint8) for f in clip])
-            yield np.asarray(clip), actions[sl].astype(np.uint8), key
+            clip = np.stack([np.asarray(Image.fromarray(f).resize((res, res),
+                             Image.BILINEAR), np.uint8) for f in px[sl]])
+            yield clip, actions[sl].astype(np.uint8), split
 
 
 # --- the encode loop ----------------------------------------------------------
 
-def encode_shard(name, clips, codec, geom, out_dir, batch, limit):
-    """Drain `clips` through the codec into <name>.npz / <name>_val.npz."""
+def encode_shard(name, stem, clips, codec, contract, out_dir, batch, limit):
+    """Drain `clips` through the codec into <stem>.npz / <stem>_val.npz.
+
+    `name` is the pixel shard (for progress lines); `stem` is that name plus the
+    clip length, which is what the files and the manifest are keyed on."""
     buf = {"train": ([], []), "val": ([], [])}
     out = {"train": 0, "val": 0}
     pend_clips, pend_acts, pend_val = [], [], []
@@ -188,11 +204,11 @@ def encode_shard(name, clips, codec, geom, out_dir, batch, limit):
         if not pend_clips:
             return
         codes = codec.encode(pend_clips)
-        # The geometry is derived from (frames, res, codec) in spec.py; if what the
+        # The contract is derived from (frames, res, codec) in spec.py; if what the
         # encoder actually returned disagrees, the cache would be built to a width
         # nothing downstream expects. Cheap to check once per batch, so check.
-        assert codes.shape[1] == geom["code_len"], \
-            f"codec returned {codes.shape[1]} codes/clip, geometry says {geom['code_len']}"
+        assert codes.shape[1] == contract["code_len"], \
+            f"codec returned {codes.shape[1]} codes/clip, contract says {contract['code_len']}"
         assert codes.max() < spec.CODEC_VOCAB, \
             f"code id {codes.max()} outside the codec's {spec.CODEC_VOCAB}-entry codebook"
         for row, act, split in zip(codes, pend_acts, pend_val):
@@ -200,9 +216,9 @@ def encode_shard(name, clips, codec, geom, out_dir, batch, limit):
             c.append(row.astype(np.uint16)); a.append(act)
         pend_clips.clear(); pend_acts.clear(); pend_val.clear()
 
-    for clip, acts, run_key in clips:
+    for clip, acts, split in clips:
         pend_clips.append(clip); pend_acts.append(acts)
-        pend_val.append(split_of(run_key))
+        pend_val.append(split)
         n += 1
         if len(pend_clips) >= batch:
             flush()
@@ -215,8 +231,9 @@ def encode_shard(name, clips, codec, geom, out_dir, batch, limit):
         if not c:
             continue
         suffix = "" if split == "train" else "_val"
-        path = out_dir / f"{name}{suffix}.npz"
-        np.savez(path, codes=np.stack(c), actions=np.stack(a))
+        path = out_dir / f"{stem}{suffix}.npz"
+        np.savez(path, codes=np.stack(c), actions=np.stack(a),
+                 action_table_version=spec.ACTION_TABLE_VERSION)
         out[split] = len(c)
     return out
 
@@ -234,14 +251,14 @@ def main():
     args = ap.parse_args()
 
     stride = args.stride or args.frames
-    geom = spec.clip_geometry(args.frames, args.res)
+    contract = spec.shape_contract(args.frames, args.res)
 
     if args.source == "parquet":
         shards = sorted(spec.PIXEL_PARQUET_DIR.glob("*.parquet"))
         reader, hint = parquet_clips, "data/download.py"
     else:
         shards = sorted(spec.PIXEL_SHARD_DIR.glob("*.bin"))
-        reader, hint = recorded_clips, "data/record.py"
+        reader, hint = recorded_clips, "data/record/run.py"
     if not shards:
         raise SystemExit(f"no {args.source} shards found — run {hint} first")
 
@@ -253,20 +270,21 @@ def main():
     spec.CODES_DIR.mkdir(parents=True, exist_ok=True)
     codec = CosmosDV(spec.CODEC_DIR, device=args.device)
     print(f"encoding {len(shards)} {args.source} shard(s) -> {spec.CODES_DIR}\n"
-          f"  geometry: {geom}\n  stride {stride}, batch {args.batch}", flush=True)
+          f"  contract: {contract}\n  stride {stride}, batch {args.batch}", flush=True)
 
     for path in shards:
         name = Path(path).stem
-        if name in done:
-            print(f"  [skip] {name} (in manifest)")
+        stem = f"{name}_{args.frames}f"
+        if stem in done:
+            print(f"  [skip] {stem} (in manifest)")
             continue
         t0 = time.time()
-        rows = encode_shard(name, reader(path, args.frames, args.res, stride),
-                            codec, geom, spec.CODES_DIR, args.batch, args.limit)
+        rows = encode_shard(name, stem, reader(path, args.frames, args.res, stride),
+                            codec, contract, spec.CODES_DIR, args.batch, args.limit)
         with open(spec.MANIFEST, "a") as f:
             f.write(json.dumps({
-                "shard": name, "status": "encoded", "source": args.source,
-                "geometry": geom, "codec": spec.CODEC_NAME, "stride": stride,
+                "shard": stem, "status": "encoded", "source": args.source,
+                "shape_contract": contract, "codec": spec.CODEC_NAME, "stride": stride,
                 "rows": rows, "seconds": round(time.time() - t0, 1),
             }) + "\n")
         print(f"  [{name}] {rows} in {time.time() - t0:.0f}s" + " " * 20, flush=True)

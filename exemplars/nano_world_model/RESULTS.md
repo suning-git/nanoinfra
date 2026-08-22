@@ -39,9 +39,12 @@ Throughput at this size, single GPU, no compile: **~130k tok/s, MFU ~79%**.
 | 5000 | 9.293 |
 | 10000 | **8.999** |
 
-Measured on 539k clips. A cache built from a handful of downloaded shards is a
-different regime — expect higher numbers and earlier overfitting; the curve's shape
-is the thing to compare, not its height.
+Measured on 539k clips, on the pre-port stack (1D rope, action table v1, batch
+4 rows — the 2026-07 exemplar). The stack has since moved to 3D rope and table
+v2; the quickstart above was re-verified to the digit on the new stack, this
+10k table was not re-run. A cache built from a handful of downloaded shards is
+a different regime anyway — expect higher numbers and earlier overfitting; the
+curve's shape is the thing to compare, not its height.
 
 NELBO is in nats per predicted token and is one-directionally comparable to an
 autoregressive nll: NELBO ≥ NLL, so a lower number definitively beats AR and a
@@ -57,6 +60,31 @@ but that is a hypothesis; the gap is the measurement. `configs/train_wm.yaml`
 therefore sets all three LRs equal, which reduces `build_optimizers` to plain AdamW.
 
 Whether core's defaults should be per-modality is still open.
+
+## The real run (README's curriculum) — reference points
+
+These come from the research twin this exemplar was crystallized out of (not in
+the public release), whose training stack is what this exemplar now is: core
+machinery, 3D rope, action table v2. Corpora differ from yours, and **NELBO is
+corpus-relative — never compare absolute numbers across corpora**; what should
+reproduce is the shape and the regime effects.
+
+| leg | regime | val NELBO |
+|---|---|---|
+| 17f from scratch | b32 rows, lr 3e-4, 57k steps, constant LR | ~5.16 at end |
+| 129f warm-started | b32 rows (262k supervised tok/update), lr 6e-4, 9k steps, warmdown | **4.195** |
+
+Regime effects you should see on your own corpus, whatever its absolute level:
+
+* equal-token batch scaling 4→32 rows: ~0.15 nat free, knee between 16k and 32k
+  supervised tokens per update;
+* the same equal-token comparison at 129f (9k x 32 rows vs 72k x 4): every
+  tracked metric improved, val 4.343 → 4.195 on the twin's corpus;
+* warmdown: a roughly uniform ~-0.37 nat endpoint shift, order-preserving
+  across arms;
+* the shipped recipe's corpus (bots + pans, no monsters) trained to a curve
+  within ±0.024 nat of the twin's reference corpus at equal volume — the
+  minimal recorder is not the bottleneck.
 
 ## Decoding the autoregressive model
 

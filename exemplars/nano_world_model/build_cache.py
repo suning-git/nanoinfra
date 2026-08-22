@@ -11,7 +11,7 @@ which rank, which position) — and a rank cannot resume another rank's shard li
 Exact per-sample resume becomes impossible, and resuming on a different number of
 GPUs is out of the question.
 
-Every row of a given geometry is exactly the same width, so the fix is to stop
+Every row of a given shape contract is exactly the same width, so the fix is to stop
 compressing along that axis: one flat binary per field, `np.memmap`ed. Then
 `dataset[i]` is a slice at `i * row_bytes`, random access costs one page fault
 (~17KB), and the sampler is free to hand out a globally shuffled index stream.
@@ -19,12 +19,12 @@ That is what lets core's ResumableDistributedSampler — whose entire state is
 {seed, epoch, index}, with no rank in it — drive video training.
 
 Size check, so nobody worries: 539k rows x 1280 codes x 2B = 1.4GB at the default
-geometry, i.e. it lives in page cache.
+contract, i.e. it lives in page cache.
 
-Run (17-frame / 128px, the default geometry):
+Run (17-frame / 128px, the default contract):
     python -m exemplars.nano_world_model.build_cache
 
-A different clip length is a different geometry, built beside this one:
+A different clip length is a different shape contract, built beside this one:
     python -m exemplars.nano_world_model.build_cache --frames 33
 """
 
@@ -44,11 +44,11 @@ CODE_DTYPE = np.uint16
 ACTION_DTYPE = np.uint8
 
 
-def shards_for(geom, split):
-    """Encoded shards of THIS geometry, from the manifest, sorted and deduped.
+def shards_for(contract, split):
+    """Encoded shards of THIS shape contract, from the manifest, sorted and deduped.
 
     The manifest is the contract: data/encode.py records what each file actually
-    contains, so selection here is a match on geometry rather than a guess from the
+    contains, so selection here is a match on the contract rather than a guess from the
     filename. That matters because one codes/ directory can hold several geometries
     at once (a 17-frame cache and a 129-frame one), and rows of the wrong width do
     not announce themselves — they surface much later as a shape error, or worse, as
@@ -63,7 +63,7 @@ def shards_for(geom, split):
             e = json.loads(line)
             if e.get("status") != "encoded" or not e.get("rows", {}).get(split):
                 continue
-            if e.get("geometry") != geom:
+            if spec.meta_contract(e, default=None) != contract:
                 continue
             names.append(e["shard"] + ("" if split == "train" else "_val"))
     return [n for n in sorted(set(names)) if (spec.CODES_DIR / f"{n}.npz").exists()]
@@ -79,14 +79,20 @@ def _append(name, shards, out_dir, code_len, n_action_tokens):
             d = np.load(spec.CODES_DIR / f"{shard}.npz", allow_pickle=True)
             codes, acts = d["codes"], d["actions"]
             assert codes.shape[1] == code_len, \
-                f"{shard}: code_len {codes.shape[1]} != geometry's {code_len}"
+                f"{shard}: code_len {codes.shape[1]} != contract's {code_len}"
             assert acts.shape[1] == n_action_tokens, \
-                f"{shard}: {acts.shape[1]} action tokens != geometry's {n_action_tokens}"
+                f"{shard}: {acts.shape[1]} action tokens != contract's {n_action_tokens}"
             assert len(codes) == len(acts), f"{shard}: codes/actions row mismatch"
             assert codes.min() >= 0 and codes.max() < np.iinfo(CODE_DTYPE).max, \
                 f"{shard}: code id out of uint16 range (codec vocab grew?)"
             assert acts.min() >= 0 and acts.max() < spec.N_ACTIONS, \
                 f"{shard}: action id outside 0..{spec.N_ACTIONS - 1}"
+            # Action-table lineage: shards without the stamp are v1 (a strict
+            # subset of v2 — NOOP was a tail append), so only a FUTURE table
+            # is an error here.
+            atv = int(d["action_table_version"]) if "action_table_version" in d else 1
+            assert atv <= spec.ACTION_TABLE_VERSION, \
+                f"{shard}: action table v{atv} newer than spec v{spec.ACTION_TABLE_VERSION}"
             fc.write(np.ascontiguousarray(codes, dtype=CODE_DTYPE).tobytes())
             fa.write(np.ascontiguousarray(acts, dtype=ACTION_DTYPE).tobytes())
             prov.append({"shard": shard, "rows": int(len(codes))})
@@ -103,7 +109,7 @@ def main():
     ap.add_argument("--force", action="store_true", help="rebuild even if meta.json exists")
     args = ap.parse_args()
 
-    geom = spec.clip_geometry(args.frames, args.res)
+    contract = spec.shape_contract(args.frames, args.res)
     out_dir = spec.cache_dir(args.frames, args.res)
     meta_path = out_dir / "meta.json"
     if meta_path.exists() and not args.force:
@@ -112,20 +118,20 @@ def main():
         raise SystemExit(f"no {spec.MANIFEST} — run data/encode.py first")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tr, va = shards_for(geom, "train"), shards_for(geom, "val")
+    tr, va = shards_for(contract, "train"), shards_for(contract, "val")
     if not tr or not va:
         raise SystemExit(f"manifest has {len(tr)} train / {len(va)} val shards at this "
-                         f"geometry ({args.frames}f/{args.res}px) — encode more, or "
-                         f"build the geometry you actually encoded")
-    print(f"building {out_dir}\n  geometry: {geom}\n  {len(tr)} train shards, {len(va)} val shards",
+                         f"contract ({args.frames}f/{args.res}px) — encode more, or "
+                         f"build the contract you actually encoded")
+    print(f"building {out_dir}\n  contract: {contract}\n  {len(tr)} train shards, {len(va)} val shards",
           flush=True)
 
     t0 = time.time()
-    n_train, prov_train = _append("train", tr, out_dir, geom["code_len"], geom["n_action_tokens"])
-    n_val, prov_val = _append("val", va, out_dir, geom["code_len"], geom["n_action_tokens"])
+    n_train, prov_train = _append("train", tr, out_dir, contract["code_len"], contract["n_action_tokens"])
+    n_val, prov_val = _append("val", va, out_dir, contract["code_len"], contract["n_action_tokens"])
 
     meta = {
-        "geometry": geom,
+        "shape_contract": contract,
         "codec": spec.CODEC_NAME,
         "code_dtype": np.dtype(CODE_DTYPE).name,
         "action_dtype": np.dtype(ACTION_DTYPE).name,

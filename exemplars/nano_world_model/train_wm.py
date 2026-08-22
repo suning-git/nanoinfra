@@ -53,6 +53,7 @@ from exemplars.nano_world_model.autoregressive import (       # noqa: E402
     Autoregressive, AutoregressiveSystem)
 from exemplars.nano_world_model.block_diffusion import (      # noqa: E402
     BlockDiffusion, BlockDiffusionSystem)
+from exemplars.nano_world_model.rope3d import install_rope3d  # noqa: E402
 from exemplars.nano_world_model.dataset import (              # noqa: E402
     VideoRowDataset, VideoRowLoader)
 from exemplars.nano_world_model.evaluator import (            # noqa: E402
@@ -89,10 +90,10 @@ def assemble_vocab():
     return layout, resolver
 
 
-def build_row_layout(layout, resolver, geom):
+def build_row_layout(layout, resolver, contract):
     """The row: where codes, actions and delimiters sit, and the block spans."""
     return row_layout.RowLayout(
-        geom,
+        contract,
         video_offset=layout.offset(spec.VIDEO_TYPE_ID),
         action_offset=layout.offset(spec.ACTION_TYPE_ID),
         control_ids={"bos": resolver.resolve("bos"), "eos": resolver.resolve("eos"),
@@ -111,14 +112,14 @@ def main(cfg: DictConfig) -> None:
     print0(f"train_wm — discrete video world model ({obj_name}) on core")
     print0("=" * 80)
 
-    # --- vocabulary + row geometry -------------------------------------------
+    # --- vocabulary + shape contract -----------------------------------------
     layout, resolver = assemble_vocab()
-    geom = spec.clip_geometry(config["clip"]["frames"], config["clip"]["res"])
-    rows = build_row_layout(layout, resolver, geom)
+    contract = spec.shape_contract(config["clip"]["frames"], config["clip"]["res"])
+    rows = build_row_layout(layout, resolver, contract)
     row_layout.use_compiled_flex_attention()
     print0(f"\nvocab: ranges={dict(layout.ranges)} -> {layout.vocab_size} ids, "
            f"{layout.n_token_types} token types")
-    print0(f"clip:  {geom}")
+    print0(f"clip:  {contract}")
     print0(f"row:   {rows}")
 
     # Block diffusion feeds the model BOTH streams — [clean | noisy] — so its sequence
@@ -159,22 +160,25 @@ def main(cfg: DictConfig) -> None:
         system = AutoregressiveSystem(base.trunk, base.head, objective)
     system.arch = base.arch          # assembly fact for checkpoint self-description
 
-    # The mirrored rope belongs to the two-stream layout: it makes the noisy copy of a
-    # position carry the SAME rotary phase as its clean twin. An autoregressive row has
-    # no twin, so it keeps core's ordinary positions.
-    # Swapped BEFORE compile so the compiled blocks see the final tables; the swap
-    # itself is a trunk attribute, outside the block graphs.
+    # Position encoding, in two moves. First the 3D tables — every objective
+    # trains on (t, y, x) coordinates (rope3d.py; a checkpoint load does not
+    # touch them, the buffers are non-persistent). Then, for diffusion only,
+    # the mirror: it makes the noisy copy of a position carry the SAME rotary
+    # phase as its clean twin. An autoregressive row has no twin.
+    # Both swapped BEFORE compile so the compiled blocks see the final tables;
+    # the swap itself is a trunk attribute, outside the block graphs.
+    install_rope3d(system.trunk, rows)
     if obj_name == "diffusion":
         rows.install_mirror_rope(system.trunk)
     if config.get("use_compile", True):
         compile_blocks(system.trunk)
 
     # --- data -----------------------------------------------------------------
-    cache = spec.cache_dir(geom["frames"], geom["res"])
+    cache = spec.cache_dir(contract["frames"], contract["res"])
     train_set = VideoRowDataset(cache, "train")
     val_set = VideoRowDataset(cache, "val")
-    assert train_set.geometry == geom, (
-        f"cache geometry {train_set.geometry} != run geometry {geom} — rebuild the "
+    assert train_set.contract == contract, (
+        f"cache contract {train_set.contract} != run contract {contract} — rebuild the "
         f"cache with build_cache.py for this clip length")
     dataloader = VideoRowLoader(train_set, rows, config["device_batch_size"],
                                 seed=config["seed"], device=device)

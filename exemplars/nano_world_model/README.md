@@ -73,11 +73,12 @@ inconclusive. Saying so is the only honest way to put the two side by side.
 
 | file | what it owns |
 |---|---|
-| `spec.py` | the knob panel: protocol ids, clip geometry, recipe. One edit re-targets everything. |
-| `data/` | **pixels to codes** — download or record, tokenize, and the format contract. Has its own README. |
+| `spec.py` | the knob panel: protocol ids (action table v2), the shape contract, recipe. One edit re-targets everything. |
+| `data/` | **pixels to codes** — download or record (a recipe-driven corpus machine), tokenize, and the format contract. Has its own README. |
 | `build_cache.py` | one-shot: encoded shards → a fixed-stride memmap. |
 | `dataset.py` | map-style dataset + the infinite, resumable, rank-sharded loader. |
 | `row_layout.py` | where every token sits; the two-stream attention mask; mirrored rope. |
+| `rope3d.py` | the position regime: true (t, y, x) rotary coordinates, one table swap. |
 | `block_diffusion.py` | one objective: noising, weighted masked CE, val NELBO — and the `System` that carries it. |
 | `autoregressive.py` | the other: next-token CE over the predicted future, and its `System`. |
 | `inference/` | the real-time decode path — static shapes, CUDA graphs, and the equivalence checks that justify them. |
@@ -113,10 +114,69 @@ torchrun --nproc_per_node=2 --standalone \
 python -m exemplars.nano_world_model.inference.benchmark
 ```
 
-Step 1 has an alternative: `data/record.py` plays the game yourself, which gives
-ground-truth actions and unlimited data at the cost of `pip install vizdoom`. See
-[data/README.md](data/README.md) for what each path costs and what it can and cannot
-produce.
+Step 1 has an alternative: record your own —
+
+```bash
+python -m exemplars.nano_world_model.data.record.run --tag rec1 --seed 0 --minutes 30
+python -m exemplars.nano_world_model.data.encode --source recorded
+```
+
+which gives ground-truth actions and unlimited data at the cost of
+`pip install vizdoom`. The recorder is driven by a corpus RECIPE
+([data/recipes/minrec.yaml](data/recipes/minrec.yaml)) — layer shares, coverage
+quotas, wall avoidance — because what you record decides what the model can
+learn; the recipe header carries the reasons. See
+[data/README.md](data/README.md) for what each path costs and what it can and
+cannot produce.
+
+## The real run: a 129-frame model you can play
+
+The five-command quickstart above trains a REAL model on a TOY budget. The
+regime below is the settled one from the research line — every number in it was
+measured, not guessed (see RESULTS.md):
+
+```bash
+# a real corpus: ~8M frames of the shipped recipe, recorded in chunks
+#   (~2h of recording; pixels are disposable, delete each .bin after encoding)
+python -m exemplars.nano_world_model.data.record.run --tag c0 --seed 0 --max_frames 1000000 --minutes 999
+python -m exemplars.nano_world_model.data.encode --source recorded               # 17f rows
+python -m exemplars.nano_world_model.data.encode --source recorded --frames 129  # 129f rows
+python -m exemplars.nano_world_model.build_cache
+python -m exemplars.nano_world_model.build_cache --frames 129
+
+# stage 1 — 17 frames, from scratch, constant LR (it will be warm-started from,
+# and a checkpoint taken mid-schedule warm-starts cleaner than one mid-decay)
+python -m exemplars.nano_world_model.train_wm \
+    total_batch_rows=32 max_steps=57000 optimizer.scheduler.warmdown_ratio=0
+
+# stage 2 — 129 frames, warm-started, equal tokens at 8x the update size,
+# warmdown over the final stretch (the config default, warmdown_ratio 0.2)
+python -m exemplars.nano_world_model.train_wm \
+    clip.frames=129 device_batch_size=2 total_batch_rows=32 \
+    optimizer.lr_max=6e-4 max_steps=9000 \
+    checkpoint.init_model_from=<stage-1 checkpoint dir>
+```
+
+Three regime facts carry this, each paid for once on the research line:
+
+* **≥32k supervised tokens per update** (`total_batch_rows=32`). At 4 rows the
+  same token budget spends itself in updates that are individually too noisy;
+  raising the batch 8x at equal tokens improved val by ~0.15 nat for free, with
+  the knee between 16 and 32k. That is also why stage 2 is 9000 large steps
+  rather than 72000 small ones.
+* **Curriculum, not scratch.** Warm-starting 129f from a 17f parent reaches the
+  same loss as direct 129f training for ~1.5x less compute. The 3D rope
+  (rope3d.py) is what makes the window change free: coordinates are absolute
+  (t, y, x) with bases fixed across window lengths, so the parent's tables
+  simply extend.
+* **Warmdown at the end, judgments before it.** The end-of-run LR decay moves
+  the endpoint by roughly -0.37 nat uniformly across arms — so it buys quality
+  but reorders nothing, and any comparison you run mid-training is honest as
+  long as both arms are pre-warmdown.
+
+To play the result, decode it interactively — `inference/` holds the fast path
+(1.1 ms/token) and `inference/benchmark.py` proves it faithful before it
+reports speed.
 
 ---
 

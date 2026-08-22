@@ -1,0 +1,64 @@
+# minrec — the corpus recipe this exemplar ships.
+#
+# Composition: two layers. Bot deathmatch worlds (the world moves on its own —
+# dynamics) and pans (committed turns with left/right-symmetric coverage quotas
+# — action-semantics hygiene). Nothing else: the exemplar teaches "train a
+# world model", not any particular research mission, and this composition is
+# the one whose 129-frame model was eyeball-judged globally map-consistent.
+#
+# The segment quotas below are settled knowledge, not guesses: committed turns
+# (a turn held long enough to read as a turn), true stand-still (noop — without
+# it the model never sees what an unpressed world does), and symmetric L/R
+# shares so neither turning direction is rarer than the other. The research
+# twin recorded a corpus from exactly this recipe (pipe_minrec_1) and its
+# training curve matched the reference corpus within ±0.024 nats.
+#
+# The monsters section carries no monsters (k: [0, 0]): it exists because its
+# walkable_mask also gates dwells and forward runs away from wall faces (a
+# dwell staring into a wall is a full-screen stall the model learns nothing
+# from). The mask ships with the recorder — it is the union of walked cells
+# from an earlier corpus on this same pinned map.
+
+root: nano_world_model
+
+layers:
+  bots: 0.45          # 8-bot worlds, segment library as filler — dynamics
+  bots_long: 0.10     # same, long episodes (window-cutting headroom)
+  pans: 0.45          # segment library exclusive: committed turns, L/R quotas
+
+episode:
+  bots_frames: 4000
+  bots_long_frames: 21000
+  pans_frames: 4000
+
+pans:
+  world_bots_frac: 1.0   # every pans episode in a bot world
+
+# Held actions between 8 and 40 tics; quotas are per-family shares.
+coverage:
+  segments:
+    pure_TL: 0.07
+    pure_TR: 0.07
+    pure_ML: 0.05
+    pure_MR: 0.05
+    FWD: 0.16
+    FWD_TL: 0.07
+    FWD_TR: 0.07
+    FWD_ML: 0.05
+    FWD_MR: 0.05
+    circle_L: 0.05
+    circle_R: 0.05
+    ATK: 0.06
+    noop: 0.06
+    sticky_random: 0.14
+  seg_tics: [8, 40]
+
+# No monsters — the mask alone is what this section is for (see header).
+monsters:
+  roster: [Zombieman]
+  k: [0, 0]
+  walkable_mask: exemplars/nano_world_model/data/record/walkable.npz
+  awake_frac: {ent_revisit: 0.0, ent_long: 0.0}
+
+val:
+  episode_every: 8      # every 8th episode is held out, marked in the sidecar

@@ -5,7 +5,7 @@ ONE class owns the layout. In the research code this knowledge was split between
 row BUILDER (which emitted the token sequence) and a row GEOMETRY (which described
 where the blocks were) — two independent derivations of the same fact, kept in
 agreement by a runtime `verify()` that re-read a built row and checked it against
-the geometry. That check existed because the two could drift, and it caught real
+the shape contract. That check existed because the two could drift, and it caught real
 drift. Deriving both from one place removes the failure mode instead of detecting it.
 
 THE ROW (interleaved action/frame layout, "FAFA"):
@@ -29,7 +29,7 @@ content. The attention mask (`train_block_mask`) grants:
                    which would otherwise hand the model its own labels)
     noisy_k->noisy its own block, bidirectionally — mask tokens co-denoise
     noisy_cond     the duplicated conditioning positions, causal; outputs unused
-The mask depends only on geometry, so ONE mask serves every row and every noise level.
+The mask depends only on the shape contract, so ONE mask serves every row and every noise level.
 
 Rope positions are MIRRORED (0..n-1 twice) so the second stream sits in the same
 positional range the model was trained on — a table swap, no core changes.
@@ -59,28 +59,28 @@ def use_compiled_flex_attention():
 
 
 class RowLayout:
-    """The token layout of one clip, derived once from geometry + vocab offsets.
+    """The token layout of one clip, derived once from the shape contract + vocab offsets.
 
     Args:
-        geom: spec.clip_geometry() dict
+        contract: spec.shape_contract() dict
         video_offset / action_offset: band bases in the shared vocab
         control_ids: {"bos", "eos", "video_start", "video_end"} -> global id
     """
 
     ALIGN = 128   # flex_attention requires Q_LEN % 128 == 0
 
-    def __init__(self, geom, video_offset, action_offset, control_ids, n_actions):
-        self.geom = geom
+    def __init__(self, contract, video_offset, action_offset, control_ids, n_actions):
+        self.contract = contract
         self.v_off = int(video_offset)
         self.a_off = int(action_offset)
         self.n_actions = int(n_actions)
         self.ctrl = {k: int(v) for k, v in control_ids.items()}
 
-        cpf, n_lat, td = geom["codes_per_frame"], geom["n_latent"], geom["td"]
+        cpf, n_lat, td = contract["codes_per_frame"], contract["n_latent"], contract["td"]
         self.cpf, self.n_lat, self.td = cpf, n_lat, td
-        self.n_blocks = geom["n_blocks"]
-        self.n_given_frames = geom["n_given"] // cpf
-        assert self.n_given_frames * cpf == geom["n_given"], "n_given must be whole frames"
+        self.n_blocks = contract["n_blocks"]
+        self.n_given_frames = contract["n_given"] // cpf
+        assert self.n_given_frames * cpf == contract["n_given"], "n_given must be whole frames"
 
         # --- lay the row out once; everything below is an index into it ---------
         # content = [bos, vstart] + L0 + (td actions + L_k) * n_blocks + [vend, eos]
@@ -128,7 +128,7 @@ class RowLayout:
         Pure fancy-indexing on the precomputed slot arrays — no per-row Python."""
         codes = np.asarray(codes)
         actions = np.asarray(actions)
-        assert codes.shape[1] == self.geom["code_len"], "cache row width != geometry"
+        assert codes.shape[1] == self.contract["code_len"], "cache row width != contract"
         B = codes.shape[0]
         idx = np.broadcast_to(self._template, (B, self.row_len)).copy()
         idx[:, self.code_slots] = self.v_off + codes.astype(np.int64)

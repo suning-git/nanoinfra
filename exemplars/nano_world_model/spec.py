@@ -10,8 +10,9 @@ Three kinds of fact live here, and the distinction matters:
   1. PROTOCOL — the shared-vocab contract (band type ids, delimiter slots, action
      count). Changing one silently invalidates every checkpoint ever trained, so
      train_wm.py asserts the assembled layout still agrees with these constants.
-  2. GEOMETRY — clip length, codec grid, and hence the row layout. Derived, not
-     guessed: `clip_geometry()` computes the whole row shape from three numbers.
+  2. SHAPE CONTRACT — clip length, codec grid, and hence the row layout. Derived,
+     not guessed: `shape_contract()` computes the whole row shape from three
+     numbers, and every stage checks its inputs against it.
   3. RECIPE — model size, LR, batch. Free to tune; nothing breaks.
 
 What is NOT here: the training loop (train_wm.py) or the objective
@@ -28,7 +29,8 @@ REPO = PROJECT.parents[1]
 
 DATASET_ROOT = REPO / "datasets" / "nano_world_model"    # everything data/ produces
 PIXEL_PARQUET_DIR = DATASET_ROOT / "vizdoom_ppo"         #   downloaded (data/download.py)
-PIXEL_SHARD_DIR = DATASET_ROOT / "recorded"              #   self-recorded (data/record.py)
+PIXEL_SHARD_DIR = DATASET_ROOT / "record_buffer"         #   self-recorded pixels (data/record/)
+SIDECAR_DIR = DATASET_ROOT / "sidecars"                  #   their durable sidecars
 CODES_DIR = DATASET_ROOT / "codes"                       #   encoded (data/encode.py)
 MANIFEST = DATASET_ROOT / "manifest.jsonl"               #   one line per encoded shard
 
@@ -60,10 +62,36 @@ VIDEO_END = "ctrl1"
 MASK_SLOT = "ctrl2"      # [MASK], the absorbing state of the diffusion forward process
 VIDEO_TYPE_ID = 4        # 0=text, 1=motion, 2=control, (3=audio reserved), 4=video
 ACTION_TYPE_ID = 5       # discrete game actions (world-model conditioning)
-N_ACTIONS = 18           # VizDoom deathmatch action set (ids 0..17)
+N_ACTIONS = 19           # VizDoom deathmatch action set (ids 0..18, table v2 below)
+
+# Action-table version. v1 was the downloaded PPO set's 18 button combos; v2
+# appends exactly one id — NOOP = 18, the all-zero vector, a TRUE stand-still
+# (without it a recorded policy can never hold still, so the model never learns
+# what an unpressed world does). Appending at the tail is what makes the break
+# cheap: ids 0..17 keep their meaning, so v1 data — including the public
+# download — remains valid v2 data that simply never uses id 18.
+ACTION_TABLE_VERSION = 2
+
+# Names for the 19 actions, BY ID. The ORDER is data protocol: every cache's
+# action ids index this list, and it must match whatever produced the data.
+# TL/TR=turn, ML/MR=strafe, FWD=forward, ATK=attack, NOOP=all buttons up.
+ACTION_NAMES = ["TL", "TR", "MR", "MR+TL", "MR+TR", "ML", "ML+TL", "ML+TR",
+                "FWD", "FWD+TL", "FWD+TR", "FWD+MR", "FWD+MR+TL", "FWD+MR+TR",
+                "FWD+ML", "FWD+ML+TL", "FWD+ML+TR", "ATK", "NOOP"]
+
+# The id -> button-vector table behind ACTION_NAMES. Button order is the
+# scenario cfg's: [ATTACK, MOVE_FORWARD, MOVE_LEFT, MOVE_RIGHT, TURN_RIGHT,
+# TURN_LEFT]. Ids 0..17 agree with the downloaded PPO set id for id.
+ACTION_COMBOS = [
+    [0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 1, 0], [0, 0, 0, 1, 0, 0], [0, 0, 0, 1, 0, 1],
+    [0, 0, 0, 1, 1, 0], [0, 0, 1, 0, 0, 0], [0, 0, 1, 0, 0, 1], [0, 0, 1, 0, 1, 0],
+    [0, 1, 0, 0, 0, 0], [0, 1, 0, 0, 0, 1], [0, 1, 0, 0, 1, 0], [0, 1, 0, 1, 0, 0],
+    [0, 1, 0, 1, 0, 1], [0, 1, 0, 1, 1, 0], [0, 1, 1, 0, 0, 0], [0, 1, 1, 0, 0, 1],
+    [0, 1, 1, 0, 1, 0], [1, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0]]  # 18: NOOP (v2)
 
 
-# --- 2. GEOMETRY: the clip and the codec that turns it into tokens -------------
+# --- 2. SHAPE CONTRACT: the clip and the codec that turns it into tokens -------
 FRAMES = 17              # frames per training clip
 RES = 128                # square clips, 128px
 
@@ -77,7 +105,7 @@ CODEC_SPATIAL_DS = 8     # H/8 x W/8 per latent frame
 CODEC_TEMPORAL_DS = 4    # causal: T frames -> 1 + (T-1)/4 latent frames
 
 
-def clip_geometry(frames=FRAMES, res=RES):
+def shape_contract(frames=FRAMES, res=RES):
     """Derive the whole row shape from (frames, res, codec). Returns a dict of
     integers; every consumer takes its numbers from here so they cannot disagree.
 
@@ -103,8 +131,18 @@ def clip_geometry(frames=FRAMES, res=RES):
 
 
 def cache_dir(frames=FRAMES, res=RES):
-    """Where build_cache.py writes the fixed-stride memmap for a given geometry."""
+    """Where build_cache.py writes the fixed-stride memmap for a given contract."""
     return CACHE_ROOT / f"dv{res}_{frames}f"
+
+
+def meta_contract(meta, default=None):
+    """The shape contract stored in a cache's meta.json or a manifest line.
+    Written as "shape_contract" since the 2026-08 rename; artifacts encoded
+    before then carry it under the old name "geometry". Read both forever —
+    re-encoding data to fix a key name would be absurd — write only the new
+    key. `default` is what a line with neither key returns (manifest matching
+    treats that as "not this contract" rather than an error)."""
+    return meta.get("shape_contract", meta.get("geometry", default))
 
 
 # --- 3. RECIPE: model size + optimization (tune freely) -----------------------

@@ -63,11 +63,16 @@ The exemplar's [`README.md`](exemplars/text_pretrain/README.md) walks the whole
 lifecycle — train → compute-optimal scaling law → inference — and
 [`RESULTS.md`](exemplars/text_pretrain/RESULTS.md) pins exactly what it produces.
 
-The other two start from their own data. `nano_world_model` downloads a public
-VizDoom recording (or records its own, if you install the game); `nano_motion` runs
-on freely downloadable motion capture, and adds text conditioning if you accept the
-licences for AMASS and HumanML3D. Each has a `data/README.md` covering what to fetch,
-what it costs, and what will bite you.
+The other two start from their own data. `nano_world_model` can borrow a public
+VizDoom recording, or make its own: install the game and it records from a corpus
+RECIPE — which behaviours to spend frames on, how long a turn is held, how much
+true stillness — because what a world model can learn is decided by what the
+recording contains. Recording is also the only way to the long-window model the
+exemplar's README builds toward: the public set is sub-sampled into fragments of
+at most ~59 frames, so a 129-frame clip cannot be cut from it at all. `nano_motion`
+runs on freely downloadable motion capture, and adds text conditioning if you
+accept the licences for AMASS and HumanML3D. Each has a `data/README.md` covering
+what to fetch, what it costs, and what will bite you.
 
 Every exemplar's `RESULTS.md` opens with numbers you can reproduce in about a minute,
 so you can tell a broken setup from a slow one before spending a GPU-day on it.

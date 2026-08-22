@@ -43,6 +43,7 @@ import torch
 import torch.distributed as dist
 
 from exemplars.nano_world_model import spec
+from exemplars.nano_world_model.rope3d import install_rope3d
 
 spec.pin_tokenizer()
 
@@ -94,8 +95,8 @@ def main():
     assert world == 2, "this test compares 2 ranks against 1"
 
     layout, resolver = train_wm.assemble_vocab()
-    geom = spec.clip_geometry(FRAMES, RES)
-    rows = train_wm.build_row_layout(layout, resolver, geom)
+    contract = spec.shape_contract(FRAMES, RES)
+    rows = train_wm.build_row_layout(layout, resolver, contract)
     row_layout.use_compiled_flex_attention()
 
     cfg = GPTConfig(sequence_len=2 * rows.row_len, vocab_size=layout.vocab_size,
@@ -103,6 +104,7 @@ def main():
                     n_token_types=layout.n_token_types)
     setup = build_system(GPT, cfg, use_compile=False, seed=0, parallel="ddp")
     system, device = setup["system"], setup["device"]
+    install_rope3d(system.trunk, rows)
     rows.install_mirror_rope(system.trunk)
     compile_blocks(system.trunk)     # the configuration we actually train in
 

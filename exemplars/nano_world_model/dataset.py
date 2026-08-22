@@ -35,6 +35,8 @@ import torch
 
 from core.data.dist_sampler import ResumableDistributedSampler
 
+from exemplars.nano_world_model import spec
+
 
 class VideoRowDataset:
     """Map-style access to one split of a fixed-stride cache.
@@ -47,15 +49,15 @@ class VideoRowDataset:
         self.cache_dir = cache_dir
         self.split = split
         self.meta = json.loads((cache_dir / "meta.json").read_text())
-        geom = self.meta["geometry"]
+        contract = spec.meta_contract(self.meta)
         n = self.meta["rows"][split]
-        self.geometry = geom
+        self.contract = contract
         self.codes = np.memmap(cache_dir / f"{split}_codes.u16",
                                dtype=self.meta["code_dtype"], mode="r",
-                               shape=(n, geom["code_len"]))
+                               shape=(n, contract["code_len"]))
         self.actions = np.memmap(cache_dir / f"{split}_actions.u8",
                                  dtype=self.meta["action_dtype"], mode="r",
-                                 shape=(n, geom["n_action_tokens"]))
+                                 shape=(n, contract["n_action_tokens"]))
 
     def __len__(self):
         return len(self.codes)
@@ -71,7 +73,7 @@ class VideoRowDataset:
 
     def __repr__(self):
         return (f"VideoRowDataset({self.split}: {len(self)} rows x "
-                f"{self.geometry['code_len']} codes, {self.cache_dir.name})")
+                f"{self.contract['code_len']} codes, {self.cache_dir.name})")
 
 
 class VideoRowLoader:

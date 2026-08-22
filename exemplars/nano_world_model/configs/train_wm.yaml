@@ -39,6 +39,9 @@ clip:
 # the natural unit here, and the token count follows from the geometry.
 # grad_accum = total_batch_rows / (device_batch_size * world_size).
 # ----------------------------------------------------------------------------
+# The default is the QUICKSTART batch. The real-run regime is 32 rows (>=32k
+# supervised tokens per update — measured knee, see README "The real run");
+# 4 rows exists so the five-command smoke fits any GPU and finishes in minutes.
 device_batch_size: 4
 total_batch_rows: 4
 
@@ -51,6 +54,8 @@ parallel: ddp
 # ----------------------------------------------------------------------------
 # Model — trunk geometry only.
 # ----------------------------------------------------------------------------
+# Position encoding is not here on purpose: the (t, y, x) 3D rope is the ONE
+# regime of this exemplar (rope3d.py) — a knob would imply an open question.
 model:
   depth: 12
   dim: 768

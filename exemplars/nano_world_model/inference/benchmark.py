@@ -45,6 +45,7 @@ from core.model.kv_cache import STATIC, KVCache, StaticKVCache  # noqa: E402
 from core.training.model_setup import build_system, load_system  # noqa: E402
 
 from exemplars.nano_world_model import train_wm        # noqa: E402
+from exemplars.nano_world_model.rope3d import install_rope3d    # noqa: E402
 from exemplars.nano_world_model.inference import sample         # noqa: E402
 
 
@@ -82,17 +83,22 @@ def main():
 
     layout, resolver = train_wm.assemble_vocab()
     system = build(args, layout)
+    # A loaded checkpoint still carries the default 1D tables (the rotary
+    # buffers are non-persistent, so neither save nor load touches them) —
+    # decoding a 3D-trained model without this line is silently wrong.
+    install_rope3d(system.trunk,
+                   train_wm.build_row_layout(layout, resolver, spec.shape_contract()))
     system.eval()
     v_off = layout.offset(spec.VIDEO_TYPE_ID)
     a_off = layout.offset(spec.ACTION_TYPE_ID)
     tid = spec.VIDEO_TYPE_ID
     g = torch.Generator(device="cuda").manual_seed(0)
-    cpf = spec.clip_geometry()["codes_per_frame"]
+    cpf = spec.shape_contract()["codes_per_frame"]
 
     # A plausible prefix: the given latent frame, then the actions driving the next one.
     given = (torch.randint(0, spec.CODEC_VOCAB, (cpf,), generator=g, device="cuda") + v_off)
     prefix = ([resolver.resolve("bos"), resolver.resolve(spec.VIDEO_START)]
-              + given.tolist() + [a_off + 11] * spec.clip_geometry()["td"])
+              + given.tolist() + [a_off + 11] * spec.shape_contract()["td"])
 
     print(f"model: d{args.depth} dim{args.dim}, vocab {layout.vocab_size}, "
           f"{'checkpoint' if args.ckpt else 'random init'}")

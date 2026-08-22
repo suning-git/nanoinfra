@@ -22,7 +22,7 @@ NLL, so a lower BD number definitively beats AR, while a higher one is inconclus
 Two implementation notes that are load-bearing rather than stylistic:
 
   * Hidden states are sliced to the masked positions BEFORE the head. Full-length
-    logits are ~1GB per row at vocab 96786.
+    logits are ~1GB per row at vocab 96787.
   * The head + cross-entropy run under torch.compile (`_head_ce`). Inductor tiles the
     vocab dimension so the [M, V] logits are never materialized: peak memory drops
     ~7x (26.7GB -> 4.0GB at M=16896), with gradients bitwise identical to eager. This
@@ -62,7 +62,7 @@ class BlockDiffusion:
         vocab: VocabLayout — supplies classify_token_types for the type embeddings
         mask_id: global id of the [MASK] control token (the absorbing state)
         t_min, t_max: noise-level range
-        device: where the (geometry-only, batch-independent) BlockMask is built
+        device: where the (contract-only, batch-independent) BlockMask is built
     """
 
     def __init__(self, rows, vocab, mask_id, t_min, t_max, device):
