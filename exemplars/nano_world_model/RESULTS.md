@@ -11,7 +11,7 @@ Straight after `build_cache.py`, on a few thousand clips:
 ```bash
 python -m exemplars.nano_world_model.train_wm \
     max_steps=30 optimizer.scheduler.warmup_steps=5 \
-    evaluation.interval_steps=15 use_compile=false checkpoint.enabled=false
+    evaluation.interval_steps=15 compile_trunk=false checkpoint.enabled=false
 ```
 
 ```

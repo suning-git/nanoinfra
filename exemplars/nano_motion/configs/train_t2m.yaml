@@ -59,7 +59,7 @@ model:
   n_kv_head: ${model.n_head}
 
 max_steps: 20000
-use_compile: true
+compile_trunk: true   # this script decides how to compile the trunk after assembly (build_system does not)
 
 # "ddp" replicates the model and syncs gradients with NanoDDP; "fsdp" shards, for
 # when the model stops fitting. Ignored on a single GPU.

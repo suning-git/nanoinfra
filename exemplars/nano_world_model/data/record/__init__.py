@@ -17,11 +17,12 @@ identical pixel shards and sidecars, before and after the strip.
 """
 
 from exemplars.nano_world_model.data.record.engine import (  # noqa: F401
-    BUFFER, DATA_ROOT, SIDECARS, H, W, NOOP, SCEN, Game, WalkableMask,
-    data_root, jpeg_frame)
+    BUFFER, DATA_ROOT, RECORDER_VERSION, SIDECARS, H, W, NOOP, SCEN, Game,
+    MapBounds, WalkableMask, data_root, jpeg_frame)
 from exemplars.nano_world_model.data.record.shards import (  # noqa: F401
     ShardWriter)
 from exemplars.nano_world_model.data.record.worlds import (  # noqa: F401
-    ARENA, LAYERS, MONSTERS, MOVER_CLASSES, TRANSIENT, WORLD_BOTS, extract)
+    ARENA, LAYERS, MONSTERS, MOVER_CLASSES, TRANSIENT, WALL_MARGIN, WORLD_BOTS,
+    extract, sample_spot)
 # run.py is not imported here: it is the CLI entry point, and importing it
 # again under `python -m ...record.run` would warn about double import.

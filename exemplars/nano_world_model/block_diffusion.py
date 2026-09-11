@@ -21,37 +21,20 @@ NLL, so a lower BD number definitively beats AR, while a higher one is inconclus
 
 Two implementation notes that are load-bearing rather than stylistic:
 
-  * Hidden states are sliced to the masked positions BEFORE the head. Full-length
-    logits are ~1GB per row at vocab 96787.
-  * The head + cross-entropy run under torch.compile (`_head_ce`). Inductor tiles the
-    vocab dimension so the [M, V] logits are never materialized: peak memory drops
-    ~7x (26.7GB -> 4.0GB at M=16896), with gradients bitwise identical to eager. This
-    is what made the long-window model trainable at all. Liger's fused CE is NOT a
-    substitute: its reduction="none" backward drops the per-token upstream weight, so
-    the loss looks right while the gradient is silently wrong (measured rel-err 0.82).
+  * Hidden states are sliced to the masked positions BEFORE the head, so its work
+    and memory scale with the number of masked positions rather than the full row.
+  * The per-token CE is the head's own `loss_per_token`, and train_wm.py builds the
+    head with head_ce="compiled" to reduce CE peak memory. The saving depends on
+    shape and software stack; compilation does not guarantee that no [M, V]
+    tensor is materialized. core/tests/unit/test_heads_per_token.py checks a fixed
+    shape's peak memory and agreement with eager under nonuniform token weights.
+    Liger's current fused linear CE backward does not support those weights, so
+    the liger arm refuses this entry. Masking, weights and normalization stay here.
 """
 
 import torch
-import torch.nn.functional as F
 
 from core.model.system import LMSystem
-
-
-@torch.compile(dynamic=True)
-def _head_ce(weight, hidden, tgt, softcap):
-    """Per-token CE [M] at masked positions — LMHead.forward + reduction='none' CE,
-    fused. Reproduces the head exactly (linear -> fp32 -> softcap tanh).
-
-    Takes the head's WEIGHT rather than the head module because it assumes a full
-    tensor. That holds for single-GPU and for replicated data parallel (NanoDDP,
-    the measured-best setup here). Under FSDP the weight is a sharded DTensor and
-    this would see one shard; that path would need the collective inside a
-    registered head method. FSDP lost on both throughput and memory at this scale
-    (2026-07-28 benchmarks), so it is deliberately unsupported.
-    """
-    logits = F.linear(hidden, weight).float()
-    logits = softcap * torch.tanh(logits / softcap)
-    return F.cross_entropy(logits, tgt, reduction="none")
 
 
 class BlockDiffusion:
@@ -105,7 +88,7 @@ class BlockDiffusion:
         generator = torch.Generator(device=idx.device).manual_seed(int(noise_seed))
         two, masked, weight = self.noise(idx, generator)
         flat_h = self._hidden_at_masked(system, two, masked)
-        ce = _head_ce(system.head.lm_head.weight, flat_h, idx[masked], system.head.softcap)
+        ce = system.head.loss_per_token(flat_h, idx[masked])              # [M]
         return (ce * weight[masked]).sum() / (idx.shape[0] * self.n_predicted)
 
     @torch.no_grad()
@@ -127,8 +110,7 @@ class BlockDiffusion:
                 masked = (torch.rand(B, n, generator=gen, device=device) < t) & in_block
                 two = torch.cat([rows, rows.masked_fill(masked, self.mask_id)], dim=1)
                 flat_h = self._hidden_at_masked(system, two, masked)
-                ce = _head_ce(system.head.lm_head.weight, flat_h, rows[masked],
-                              system.head.softcap)
+                ce = system.head.loss_per_token(flat_h, rows[masked])
                 total += ce.sum().item()
                 count += int(masked.sum())
             per_t[t] = total / max(count, 1)

@@ -61,24 +61,13 @@ def main():
                     help="processes = GPUs (default 1)")
     ap.add_argument("--parallel", default=None, choices=["ddp", "fsdp"],
                     help="multi-GPU placement (default: orchestrator's fsdp); "
-                         "ignored at --nproc 1 — but see the warning below")
+                         "ignored at --nproc 1 (one device compiles the whole trunk "
+                         "whatever this says)")
     ap.add_argument("--smoke", type=int, default=0, metavar="STEPS",
                     help="short run: STEPS steps, no checkpointing, log every step")
     ap.add_argument("overrides", nargs="*", metavar="key=value",
                     help="extra Hydra overrides passed to the orchestrator")
     args = ap.parse_args()
-
-    # A single-process run with parallel=ddp is NOT the single-GPU baseline, even
-    # though `parallel` is supposed to be ignored on one device. The orchestrator
-    # disables whole-graph compile whenever parallel=='ddp' (correctly: it would
-    # destroy the gradient overlap) but installs the per-block replacement only
-    # when world_size > 1 — so at --nproc 1 the trunk runs EAGER, ~26% slow for a
-    # reason that has nothing to do with data parallelism (measured: 129.7k vs
-    # 174.7k tok/s). For a single-GPU baseline, leave --parallel unset.
-    if args.nproc == 1 and args.parallel == "ddp":
-        print("WARNING: --nproc 1 with --parallel ddp runs the trunk UNCOMPILED "
-              "(see the note in pretrain.py). For a single-GPU baseline leave "
-              "--parallel unset.", flush=True)
 
     if args.smoke:
         # A smoke run proves the loop, not the model: nothing persists, and every

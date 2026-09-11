@@ -63,7 +63,7 @@ model:
   n_kv_head: ${model.n_head}
 
 max_steps: 200000
-use_compile: true               # per-block (see train_wm.compile_per_block)
+compile_trunk: true               # per-block: train_wm.py calls compile_blocks after assembly
 
 # ----------------------------------------------------------------------------
 # The masked-diffusion noise schedule. t is clipped away from 0: the MDLM 1/t

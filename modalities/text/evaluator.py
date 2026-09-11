@@ -75,13 +75,17 @@ class TextEvaluator(Evaluator):
         eval_steps = eval_tokens // (device_batch_size * sequence_len * world_size)
 
         self.metric = stream.get('metric', f'val/{self.name}_ce')
+        bpb_metric = stream.get('bpb_metric')
         self._eval = LossEvaluator(
             dataloader=None,                        # created per evaluate() call
             eval_steps=max(1, eval_steps),
             mode='logits',
-            token_bytes=get_token_bytes(device='cuda'),
+            # The byte table is fetched only when the stream asks for bpb, and
+            # get_token_bytes fails closed (no ones-table stand-in): a stream that
+            # declares bpb either reports bits per BYTE or does not start.
+            token_bytes=get_token_bytes(device='cuda') if bpb_metric else None,
             total_metric=self.metric,
-            bpb_metric=stream.get('bpb_metric'),
+            bpb_metric=bpb_metric,
         )
 
     def describe(self) -> str:
@@ -104,5 +108,4 @@ class TextEvaluator(Evaluator):
                 B=self.device_batch_size, T=self.sequence_len,
             )
         self._eval.dataloader = val_loader
-        with autocast_ctx:
-            return self._eval.evaluate(model, autocast_ctx)
+        return self._eval.evaluate(model, autocast_ctx)   # LossEvaluator enters the context

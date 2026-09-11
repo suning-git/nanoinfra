@@ -133,7 +133,8 @@ def evaluate_loss_fused(model, loader, steps, type_ids=None, token_bytes=None):
     """
     Evaluate loss via head_loss / head_type_losses (fused CE).
 
-    Memory-safe: never materializes full [B, T, V] logits.
+    Memory-safe on the liger head, which never materializes the [B, T, V] logits
+    (the compiled head materializes the bf16 projection, naive the fp32 logits).
 
     Args:
         model: GPT model (forward returns hidden, has head_loss/head_type_losses)
@@ -192,7 +193,16 @@ def evaluate_loss_fused(model, loader, steps, type_ids=None, token_bytes=None):
                 type_loss_sums[i] += type_losses_batch[tid] * n_type
                 type_counts[i] += n_type
 
-        # BPB
+        # BPB: nats over BYTE-BEARING targets only. `loss` averages over every valid
+        # target, zero-byte control tokens included, so it cannot be charged to the
+        # byte-bearing ones (public issue #6). Run the fused CE once more with the
+        # zero-byte targets masked to IGNORE: one extra head pass, still fused on Liger,
+        # and the mean over the masked set is exact on all arms. Unconditional on
+        # purpose: head.loss is an FSDP forward method, so every rank must issue it
+        # the same number of times regardless of its batch. A batch with no
+        # byte-bearing target gives nan (0/0): contribute 0 nats for THAT case only
+        # (torch.where on the count), so a real NaN/Inf on a non-empty set still
+        # propagates to bpb the way it does to total_loss.
         if has_bpb:
             valid = (y_flat >= 0)
             y_safe = torch.where(valid, y_flat, torch.zeros_like(y_flat))
@@ -202,8 +212,11 @@ def evaluate_loss_fused(model, loader, steps, type_ids=None, token_bytes=None):
                 torch.zeros_like(y_flat, dtype=token_bytes.dtype),
             )
             bpb_valid = valid & (num_bytes > 0)
-            if n_valid > 0:
-                total_nats += loss * bpb_valid.sum()
+            n_bpb = bpb_valid.sum()
+            y_bytes = torch.where(bpb_valid.reshape(y.shape), y,
+                                  torch.full_like(y, VocabLayout.IGNORE_INDEX))
+            bpb_loss = model.head.loss(hidden, y_bytes)
+            total_nats += torch.where(n_bpb > 0, bpb_loss * n_bpb, torch.zeros_like(bpb_loss))
             total_bytes += num_bytes[bpb_valid].sum()
 
     # Distributed all_reduce

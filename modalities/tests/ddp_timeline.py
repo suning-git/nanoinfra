@@ -146,13 +146,13 @@ def build(args):
                     n_layer=args.depth, n_head=max(1, (dim + 127) // 128),
                     n_kv_head=max(1, (dim + 127) // 128), n_embd=dim,
                     n_token_types=layout.n_token_types)
-    # use_compile=False + compile_blocks = the per-block compile DDP requires, and
-    # the single-GPU arm gets exactly the same treatment so the compute being timed
-    # is the same compute. (A whole-graph compile would have no per-block seams at
+    # compile_blocks on both arms = the per-block compile DDP requires, and the
+    # single-GPU arm gets exactly the same treatment so the compute being timed is
+    # the same compute. (A whole-trunk compile would have no per-block seams at
     # all — every gradient finalizes at the end of backward.)
     # head_ce pinned for the same reason the compile mode is: this is an
     # instrument, and its two arms must differ only in world size.
-    setup = build_system(GPT, cfg, use_compile=False, head_ce="liger",
+    setup = build_system(GPT, cfg, head_ce="liger",
                          seed=SEED, parallel="ddp")
     system = setup["system"]
     compile_blocks(system.trunk)

@@ -38,7 +38,7 @@ import modalities.text
 from modalities.text.train_text import SOURCE_TYPES, assemble_vocab
 from modalities.text.streams import build_evaluators, report, resolve_sources
 from modalities.text import TextEvaluator, get_tokenizer
-from core.training.model_setup import build_system, print0
+from core.training.model_setup import build_system, compile_system_trunk, print0
 from core.training.trainer import Trainer, create_optimizers
 from core.model.gpt import GPT, GPTConfig
 from core.data.mixed_dataloader import MixedDataLoader
@@ -146,7 +146,7 @@ def main():
         f"device_batch_size={args.device_batch_size}",
         f"optimizer.lr_max={args.lr}",
         f"max_steps={args.max_steps}",
-        "use_compile=false",            # nano-dsv4 is eager (data-dependent expert loop / topk)
+        "compile_trunk=false",            # nano-dsv4 is eager (data-dependent expert loop / topk)
         "checkpoint.enabled=true",
         f"checkpoint.save_every={args.save_every}",
         f"checkpoint.save_dir=${{oc.env:NANOINFRA_BASE_DIR,./outputs}}/checkpoints/{name}",
@@ -160,8 +160,7 @@ def main():
     trunk_cls, trunk_config = make_trunk(args.arch, args.seq_len, layout,
                                          gpt_depth=args.gpt_depth, gpt_dim=args.gpt_dim,
                                          gpt_heads=args.gpt_heads)
-    use_compile = args.arch == "gpt"
-    setup = build_system(trunk_cls, trunk_config, use_compile=use_compile,
+    setup = build_system(trunk_cls, trunk_config,
                          # "compiled", not "liger": this file ships in the public
                          # repo, where liger is an optional extra. The exemplars pin
                          # liger because their recorded numbers came from it and so
@@ -173,6 +172,10 @@ def main():
                          head_ce="compiled",
                          seed=config.get("seed", 42))
     system = setup["system"]
+    if args.arch == "gpt":
+        # build_system does not compile the trunk; the dense GPT takes the whole trunk
+        # (dynamic=True, as before). nano-dsv4 stays eager here, as before.
+        compile_system_trunk(system, dynamic=True)
     param_account(system.trunk, args.arch)
 
     # noaux_tc balance controller runs per OPTIMIZER step, but forward() runs per

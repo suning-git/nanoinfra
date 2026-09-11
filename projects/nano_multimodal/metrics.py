@@ -9,11 +9,10 @@ students should not need a wandb account to see their own loss curve, and the we
 should not have to parse a terminal.
 
 THE SEAM. Trainer sends BOTH the periodic training metrics and every evaluator's
-results through one object — the return value of `_init_wandb()` — and that object
-is duck-typed (core's own DummyWandb is the no-op version). So a run that writes
-jsonl is a wandb-shaped object plus a four-line Trainer subclass. The Trainer's
-docstring names inheritance as its extension mechanism, so this is the sanctioned
-door, not a pry bar.
+results through one object — the return value of `_init_metrics()`, called on
+rank 0 only — and that object is duck-typed (core's own DummyWandb is the no-op
+version). So a run that writes jsonl is a wandb-shaped object plus a four-line
+Trainer subclass. Overriding `_init_metrics` is the sanctioned door, not a pry bar.
 
 Nothing here belongs in core yet: it has one consumer. When it has two it can earn
 its way in (core/vision.md, "When Patterns Emerge").
@@ -79,9 +78,9 @@ class TrainerWithJsonl(Trainer):
         self.metrics_path = metrics_path
         super().__init__(*args, **kwargs)
 
-    def _init_wandb(self):
-        run = super()._init_wandb()
-        if not self.metrics_path or not self.master_process:
+    def _init_metrics(self):
+        run = super()._init_metrics()
+        if not self.metrics_path:
             return run
         from core.utils import DummyWandb
         inner = None if isinstance(run, DummyWandb) else run

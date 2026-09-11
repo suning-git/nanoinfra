@@ -77,6 +77,11 @@ checkpoint:
   keep_last_n: 2             # keep the most recent N checkpoints (-1 = keep all)
   resume_from: null          # resume path (null = train from scratch | auto = auto-find | explicit path = resume from it)
   init_model_from: null      # model-weight init path (loads model only; optimizer/dataloader start fresh)
+  # Resume policy for initial_lr / weight_decay / betas / eps in the constructed groups:
+  # false: reject differences from the checkpoint. true: adopt all current values,
+  # including defaults, while retaining restored weights, moments and progress.
+  # Has no effect without a resume. Must be a boolean on every path.
+  override_optimizer_hparams: false
 
 # ============================================================================
 # Logging config

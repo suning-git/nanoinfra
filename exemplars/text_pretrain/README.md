@@ -92,11 +92,17 @@ visible as amortization goes away. And **ddp beats fsdp by ~12%** on the same
 recipe when the model fits comfortably on one card — the replicate-while-it-fits
 rule, reproduced on the text family.
 
-**A trap, not a result**: `--nproc 1 --parallel ddp` measures 129,746 tok/s and
-it is NOT a ddp fact — that combination runs the trunk uncompiled (whole-graph
-compile is off for ddp at any world size; the per-block replacement installs
-only at world > 1). `pretrain.py` warns if you ask for it; baseline = leave
-`--parallel` unset.
+**A former trap, fixed 2026-09-10**: `--nproc 1 --parallel ddp` used to measure
+129,746 tok/s, and that was NOT a ddp fact — the orchestrator decided whole-trunk
+compile before it knew `world_size` (off whenever `parallel=ddp`) and installed the
+per-block replacement only at world > 1, so that combination ran the trunk
+uncompiled. `build_system` no longer compiles the trunk (`head_ce=compiled` still
+installs a compiled head loss at assembly); the orchestrator decides
+after assembly, with `world_size` in hand (`modalities/text/train_text.py`), and on
+one device it compiles the whole trunk whatever `--parallel` says. Re-measured on
+the fix (40-step smoke, this recipe, one RTX 5090): `--nproc 1` 169,214 tok/s,
+`--nproc 1 --parallel ddp` 169,053 tok/s; the pre-fix code on the same day and
+recipe, 126,434 tok/s. The rows above keep the conditions they were measured under.
 
 To see WHERE the overlap happens — per-bucket all_reduce timing against
 per-block backward compute, CUDA events on both streams — run the probe

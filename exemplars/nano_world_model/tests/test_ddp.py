@@ -102,7 +102,7 @@ def main():
     cfg = GPTConfig(sequence_len=2 * rows.row_len, vocab_size=layout.vocab_size,
                     n_layer=DEPTH, n_head=HEADS, n_kv_head=HEADS, n_embd=DIM,
                     n_token_types=layout.n_token_types)
-    setup = build_system(GPT, cfg, use_compile=False, seed=0, parallel="ddp")
+    setup = build_system(GPT, cfg, seed=0, parallel="ddp", head_ce="compiled")
     system, device = setup["system"], setup["device"]
     install_rope3d(system.trunk, rows)
     rows.install_mirror_rope(system.trunk)

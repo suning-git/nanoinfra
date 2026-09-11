@@ -10,7 +10,7 @@ After `data/encode.py`, on a small LAFAN1 cache:
 ```bash
 python -m exemplars.nano_motion.train_t2m \
     max_steps=6 optimizer.scheduler.warmup_steps=2 evaluation.interval_steps=3 \
-    use_compile=false checkpoint.enabled=false device_batch_size=4
+    compile_trunk=false checkpoint.enabled=false device_batch_size=4
 ```
 
 ```

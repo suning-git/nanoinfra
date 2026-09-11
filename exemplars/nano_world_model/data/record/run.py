@@ -17,15 +17,14 @@ import time
 import numpy as np
 import yaml
 
-from exemplars.nano_world_model import spec
 from exemplars.nano_world_model.data.record import policies
 from exemplars.nano_world_model.data.record.engine import (
-    NOOP, Game, WalkableMask, data_root, jpeg_frame)
+    NOOP, Game, WalkableMask, jpeg_frame)
 from exemplars.nano_world_model.data.record.policies import (
     FWD_FAMILY, BalancedChooser, PansPolicy, coverage_policy)
 from exemplars.nano_world_model.data.record.shards import ShardWriter
 from exemplars.nano_world_model.data.record.worlds import (
-    ARENA, LAYERS, WORLD_ASLEEP, WORLD_BOTS, _self_id, extract)
+    LAYERS, WORLD_ASLEEP, WORLD_BOTS, _self_id, extract, sample_spot)
 
 # --- episode runner ----------------------------------------------------------
 
@@ -101,9 +100,20 @@ def run_episode(writer, rng, recipe, ep, seed, layer_name, world, n_frames,
         if nxt is None:
             actor.abort()
             break
+        pose = game.pose()
+        if not game.in_map(pose[0], pose[1]):
+            # Sentinel (v4.1): with every warp target checked this should never
+            # fire; if it does, drop the episode rather than record the void.
+            print(f"[{writer.tag}] ep {ep}: player OUTSIDE THE MAP at stream "
+                  f"tic {n} pose=({pose[0]:.0f},{pose[1]:.0f}) — episode dropped",
+                  flush=True)
+            actor.abort()
+            writer.drop_current_episode(ep)
+            game.close()
+            return 0
         labs, movs = extract(nxt, self_id)
-        writer.add(jpeg_frame(nxt), a, game.pose(), labs, movs, ep, layer)
-        xy = game.pose()[:2]
+        writer.add(jpeg_frame(nxt), a, pose, labs, movs, ep, layer)
+        xy = pose[:2]
         if a in FWD_FAMILY and np.hypot(xy[0] - last_xy[0], xy[1] - last_xy[1]) < 2.0:
             blocked_run += 1
         else:
@@ -136,13 +146,12 @@ def run_episode(writer, rng, recipe, ep, seed, layer_name, world, n_frames,
                         # resort: ~600 tics of failed escapes first, and the warp
                         # tic is in the cmd schedule for any consumer that wants
                         # to drop windows straddling it.
-                        for _ in range(40):
-                            wx = int(rng.integers(ARENA[0], ARENA[1]))
-                            wy = int(rng.integers(ARENA[2], ARENA[3]))
-                            if wmask is None or wmask.ok(wx, wy):
-                                break
-                        game.cmd(f"warp {wx} {wy}")
-                        recovery = [policies.FWD] * 10
+                        # Target via sample_spot (v4.1: inside the map with
+                        # margin); no valid spot in 40 draws = another round.
+                        spot = sample_spot(game, rng, wmask)
+                        if spot is not None:
+                            game.cmd(f"warp {spot[0]} {spot[1]}")
+                            recovery = [policies.FWD] * 10
                         stuck_rounds = 0
                     else:
                         turn = policies.TR if rng.random() < 0.5 else policies.TL
@@ -152,7 +161,7 @@ def run_episode(writer, rng, recipe, ep, seed, layer_name, world, n_frames,
     writer.note_episode(ep, seed=seed, val=is_val, world=world, layer=layer,
                         self_id=self_id, timeout=timeout, cmds=game.cmds,
                         pre_buttons=game.pre_buttons, spawns=spawns,
-                        events=actor.events)
+                        events=actor.events, respawn_tics=game.respawn_tics)
     game.close()
     return n
 

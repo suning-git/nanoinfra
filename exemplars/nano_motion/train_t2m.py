@@ -265,11 +265,11 @@ def main(cfg: DictConfig) -> None:
     # state it rather than inherit core's naive default. (Its per-level evaluator
     # does NOT go through head.type_losses — it calls system.head(...) + F.cross_entropy
     # directly, so eval is arm-independent.)
-    setup = build_system(GPT, gpt_config, use_compile=False, head_ce="liger",
+    setup = build_system(GPT, gpt_config, head_ce="liger",
                          parallel=("ddp" if is_dist and config["parallel"] == "ddp"
                                    else config["parallel"]))
     system = setup["system"]
-    if config.get("use_compile", True):
+    if config.get("compile_trunk", True):
         compile_blocks(system.trunk)
 
     ddp = None

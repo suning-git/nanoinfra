@@ -5,6 +5,8 @@ Each evaluator encapsulates its own data source, metrics, and eval budget.
 Trainer just iterates evaluators and merges result dicts.
 """
 
+import contextlib
+
 import torch.distributed as dist
 
 from core.evaluation.eval_loss import evaluate_loss_logits, evaluate_loss_fused
@@ -47,6 +49,14 @@ class Evaluator:
     `eval_at` holds an explicit set of steps (e.g. a log-spaced schedule
     computed by the orchestrator and passed through config; core never
     computes schedules). Subclasses may override should_eval() entirely.
+
+    Precision: the Trainer passes the autocast context it trains under, and the
+    EVALUATOR enters it around whatever should run under that regime (it may keep
+    loader construction or fp32 metric reduction outside). Every evaluate()
+    implementation, this module's included, is responsible for entering it.
+    Enter it ONCE: torch.amp.autocast keeps its restore state on the instance, so
+    nesting the same object leaves autocast switched on after the outer exit. A
+    wrapper that delegates to LossEvaluator must not enter the context itself.
     """
 
     interval_steps: int = 50        # periodic cadence, subclasses set from config
@@ -88,7 +98,7 @@ class LossEvaluator(Evaluator):
         self.bpb_metric = bpb_metric
         self._eval_fn = evaluate_loss_fused if mode == 'fused' else evaluate_loss_logits
 
-    def evaluate(self, model, _autocast_ctx):
+    def evaluate(self, model, autocast_ctx):
         type_ids = list(self.type_metrics) if self.type_metrics else None
         # Real System (trunk + head) → the eval_loss service (logits/fused). A mock
         # per-token-loss model (unit tests) has neither → the compat helper.
@@ -96,10 +106,13 @@ class LossEvaluator(Evaluator):
             eval_fn = self._eval_fn
         else:
             eval_fn = evaluate_loss_compat
-        raw = eval_fn(
-            model, self.dataloader, self.eval_steps,
-            type_ids=type_ids, token_bytes=self.token_bytes,
-        )
+        # Enter the Trainer's precision regime here (base-class contract). None is
+        # accepted for callers that evaluate outside any autocast, e.g. unit tests.
+        with autocast_ctx if autocast_ctx is not None else contextlib.nullcontext():
+            raw = eval_fn(
+                model, self.dataloader, self.eval_steps,
+                type_ids=type_ids, token_bytes=self.token_bytes,
+            )
         results = {}
         if self.total_metric and "total_loss" in raw:
             results[self.total_metric] = raw["total_loss"]

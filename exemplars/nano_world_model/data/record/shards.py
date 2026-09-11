@@ -11,7 +11,8 @@ import json
 
 import numpy as np
 
-from exemplars.nano_world_model.data.record.engine import H, W, data_root
+from exemplars.nano_world_model.data.record.engine import (
+    RECORDER_VERSION, H, W, data_root)
 
 class ShardWriter:
     """Rotating pixel shards + sidecar npz. Pixels are transient (encoder
@@ -45,9 +46,13 @@ class ShardWriter:
         self.lab_ofs, self.lab = [0], []
         self.mov_ofs, self.mov = [0], []
         self.ep_meta = {}                 # ep -> dict
+        self._cur_ep, self._ep_start = None, None
 
     def add(self, frame, action, pose, labs, movs, ep, layer):
         assert self.n < self.cap, "shard overflow — end_episode() not called?"
+        if ep != self._cur_ep:            # where this episode begins, for drop
+            self._cur_ep = ep
+            self._ep_start = (self.n, len(self.lab), len(self.mov), len(self.cls))
         self.buf[self.n] = frame
         self.n += 1
         self.acts.append(action)
@@ -63,7 +68,34 @@ class ShardWriter:
     def note_episode(self, ep, **meta):
         self.ep_meta[ep] = meta
 
+    def drop_current_episode(self, ep):
+        """Rewind every per-frame list to where episode `ep` began, so an
+        episode the runner rejects mid-stream (v4.1: the player is found
+        outside the map) leaves NO frames behind. Episodes are contiguous and
+        the current one is always last, so this is a truncation; the memmap
+        rows past n are overwritten by the next episode or cut at close().
+
+        Keyed by `ep` on purpose: if `ep` never reached add() (rejected on its
+        very first tic) there is nothing to drop, and the bookkeeping must not
+        be mistaken for the PREVIOUS episode's — end_episode() also closes the
+        book, so a stale _cur_ep cannot survive into the next episode."""
+        if self._cur_ep != ep:
+            return
+        n0, l0, m0, c0 = self._ep_start
+        self.n = n0
+        for lst in (self.acts, self.pose, self.eps, self.layer):
+            del lst[n0:]
+        del self.lab_ofs[n0 + 1:]
+        del self.lab[l0:]
+        del self.mov_ofs[n0 + 1:]
+        del self.mov[m0:]
+        for name in [k for k, v in self.cls.items() if v >= c0]:
+            del self.cls[name]            # class ids minted only by this episode
+        self.ep_meta.pop(ep, None)
+        self._cur_ep, self._ep_start = None, None
+
     def end_episode(self):
+        self._cur_ep, self._ep_start = None, None
         if self.n >= self.cap - 25_000:
             self._roll()
 
@@ -113,6 +145,8 @@ class ShardWriter:
                  for m in M]) if any(len(m["pre_buttons"]) for m in M)
                 else np.zeros((0, 6), np.uint8)),
             ep_cmds=json.dumps({int(e): m["cmds"] for e, m in zip(eps_here, M)}),
+            ep_respawn_tics=json.dumps({int(e): list(m.get("respawn_tics", []))
+                                        for e, m in zip(eps_here, M)}),
             spawns=json.dumps({int(e): m["spawns"] for e, m in zip(eps_here, M)}),
             # events (stream-frame indices, relative to episode start)
             ev_ep=np.array([e for m, e0 in zip(M, eps_here) for e in [e0] * len(m["events"])],
@@ -125,6 +159,7 @@ class ShardWriter:
             ev_plan=np.array([[ev.plan_T, ev.plan_deg] for ev in events],
                              np.float32).reshape(-1, 2),
             class_names=json.dumps({v: k for k, v in self.cls.items()}),
+            recorder_version=RECORDER_VERSION,
             h=H, w=W, recipe=json.dumps(self.recipe))
         print(f"  [shard] {self.name}: {self.n} frames sealed", flush=True)
 

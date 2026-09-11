@@ -5,7 +5,7 @@ What this project produces, through the blessed Orchestrator
 law, (3) inference. How the recipe's `lr_max=3e-4` was chosen is
 [`provenance.md`](provenance.md).
 
-**Fixed facts:** dim = depth×64, vocab 32768, seed 42, use_compile=true,
+**Fixed facts:** dim = depth×64, vocab 32768, seed 42, compile_trunk=true (the key was named `use_compile` when these ran),
 `head_ce=liger`, Chinchilla `target_param_data_ratio=20`. GPU: RTX 5090 (32 GB,
 500 W-capped). FineWeb sample-10BT.
 

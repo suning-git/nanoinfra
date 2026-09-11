@@ -134,3 +134,17 @@ what makes exact resume possible.
 | `scenarios/` | the map recorded on — see `../NOTICE` for its provenance |
 | `codec.py` | the frozen Cosmos DV4x8x8 encoder, wrapped to one method |
 | `encode.py` | both sources → codes + manifest |
+
+
+## Recorder version
+
+Every sidecar carries `recorder_version`. **v4.1** (2026-08-31): every warp target
+and every recorded tic must be inside the map (`MapBounds` / `Game.in_map`, built
+from the engine's own wall lines), episodes whose player leaves the map are
+dropped, and auto-respawns are recorded as `ep_respawn_tics`. Corpora recorded by
+v4 and earlier can contain episodes played entirely outside the map — the
+`warp` console command accepts any coordinate, and outside the map one-sided
+walls are invisible from behind, so the frame stops being redrawn while the
+game keeps ticking (9.6% of the research corpus pipe4). Filter such corpora
+per episode with `MapBounds.inside` on the sidecar poses. `record/walkable.npz`
+was rebuilt from in-map poses only at the same time.

@@ -47,7 +47,7 @@ def train_overrides(depth=DEPTH, lr=LR_MAX, parallel=None, **extra):
         "optimizer.lr_max": lr,
         "seed": SEED,
         "max_steps": -1,        # Chinchilla auto-size (token budget from DEPTH)
-        "use_compile": "true",
+        "compile_trunk": "true",
         # Which implementation computes the head's cross-entropy. core defaults to
         # "naive" (it must: the default may not decide to compile, and it may not
         # depend on an optional package). This project states its own, because the

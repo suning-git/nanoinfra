@@ -53,8 +53,10 @@ has no suitable interpreter, `uv venv` fetches one from GitHub, which a firewall
 network will not allow — supply your own instead, with
 `uv venv --python /path/to/python3.12`.
 
-The `liger` extra is what all three exemplars pin as their `head_ce` — the
-implementation their recorded numbers were measured on. It is an extra rather than a
+The `liger` extra is what the exemplars pin as their `head_ce` — the
+implementation their recorded numbers were measured on (the world model's block
+diffusion arm is the one exception: it needs an unreduced per-token loss and uses
+`compiled`). It is an extra rather than a
 base dependency because nothing in the framework's default path needs it: core's
 `head_ce` defaults to `naive`, which depends on no optional package and runs
 anywhere. Plain `pip install -e .` installs and runs fine; the exemplars will then
@@ -63,10 +65,10 @@ than the one their numbers came from. See
 [`head_ce`](core/training/model_setup.py) for what the three arms are and what each
 costs.
 
-Requires Python ≥ 3.12 and a CUDA GPU for training. `use_compile` is on by
+Requires Python ≥ 3.12 and a CUDA GPU for training. `compile_trunk` is on by
 default and torch.compile's inductor backend compiles C++17, so a **gcc ≥ 9**
 toolchain has to be on PATH (set `CC`/`CXX` if the system compiler is older —
-CentOS 7 ships 4.8.5, for instance). Train with `use_compile=false` to skip it.
+CentOS 7 ships 4.8.5, for instance). Train with `compile_trunk=false` to skip it.
 
 `torch>=2.6` is a floor, not a pin — a fresh install resolves to whatever is current,
 which need not match the version an exemplar's recorded numbers came from (this tree
@@ -91,8 +93,11 @@ CUDA_VISIBLE_DEVICES=0 python -m exemplars.text_pretrain.pretrain
 ```
 
 Yes, you train the tokenizer yourself — it's a from-scratch framework all the way
-down. Skipping step 2 falls back to the generic gpt2 vocab with a loud warning:
-training still runs, but in a different world than the exemplar's numbers.
+down. Step 2 is not optional: without the trained artifact the orchestrator falls
+back to the generic gpt2 vocab, warns, and then stops at vocabulary assembly
+(`layout/artifact vocab mismatch`) rather than training in a different world than
+the exemplar's numbers. Step 2 also writes `token_bytes.pt`, the per-token byte
+table behind `val/bpb`; a stream that declares bpb refuses to start without it.
 
 The exemplar's [`README.md`](exemplars/text_pretrain/README.md) walks the whole
 lifecycle — train → compute-optimal scaling law → inference — and

@@ -26,6 +26,17 @@ warmdown tail). The originally logged "bpb" column was bits-per-token
 
 Full per-run metrics + val-CE trajectories: [`example_results/bracket.json`](example_results/bracket.json).
 
+**Byte-table note (2026-09-11).** Every bits/byte figure measured before 2026-09-11
+used a `token_bytes.pt` (sha256 `481782d8…`) that overstated the byte length of 216
+of the 32768 ids: the byte-fallback ids 128–255 and 88 merges ending mid-character
+were counted through U+FFFD (3 bytes) instead of their real 1–5 bytes. The corrected
+table (sha256 `27f38b8f…`, built by `build_token_bytes` from the unchanged
+`tokenizer.pkl`) makes the denominator smaller, so those bpb values read LOW by a
+corpus-dependent fraction — 0.0825% on a 1.4M-token FineWeb shard-0 sample, 0.0904%
+on shard 5. The figures above are kept as measured, under the old table; CE, tokens,
+and checkpoints are unaffected. A re-measurement under the new table would be listed
+separately with its date, not patched in here.
+
 ## Verdict: `3e-4` wins — a clean U
 
 ```

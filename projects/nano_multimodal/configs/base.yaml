@@ -20,7 +20,7 @@ defaults:
   - _self_
 
 seed: 42
-use_compile: true
+compile_trunk: true   # this script decides how to compile the trunk after assembly (build_system does not); the head's CE implementation is head_ce
 
 # Which implementation computes the head's cross-entropy: naive | liger | compiled.
 # It matters most where the model is SMALL — a shallow trunk is outweighed by its own

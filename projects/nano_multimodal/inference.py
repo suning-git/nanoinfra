@@ -150,10 +150,11 @@ def load(line, ckpt=None, device="cuda", config=None):
     config = config or assembly.load_config(line)
     vocab = assembly.assemble_vocab(line, config)
 
-    # use_compile=False on purpose. build_system's compile is the TRAINING one
-    # (`dynamic=True`), and dynamic shapes are exactly what stops CUDA graphs from
-    # being captured. The decode compile is a different mode applied to a different
-    # path, and it happens in _enable_graphs, from the static sampler only.
+    # load_system hands back an EAGER trunk (assembly never compiles). The training
+    # compile (`dynamic=True`) would be wrong here anyway: dynamic shapes are exactly
+    # what stops CUDA graphs from being captured. The decode compile is a different
+    # mode applied to a different path, and it happens in _enable_graphs, from the
+    # static sampler only.
     # Retention can delete the chosen directory between the listing and the load
     # while a run is still going. Try the next candidate rather than failing a
     # browser request on a race the reader cannot see.
@@ -161,7 +162,7 @@ def load(line, ckpt=None, device="cuda", config=None):
     for cand in candidates[:4]:
         try:
             setup = load_system(str(cand), sequence_len=vocab.sequence_len,
-                                use_compile=False, head_ce="naive")
+                                head_ce="naive")
             ckpt = cand
             break
         except (FileNotFoundError, OSError) as e:

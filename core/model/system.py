@@ -13,7 +13,9 @@ FSDP: the System itself is NOT sharded (it owns no parameters); the trunk and th
 head are each their own shard group (separate FSDP roots).
 The compiled trunk is held OUTSIDE the module registry (object.__setattr__), because
 torch.compile wraps the SAME parameters as the registered trunk; registering it too
-would double-count them in state_dict / parameters().
+would double-count them in state_dict / parameters(). It is registered by the
+orchestrator after assembly (core/training/model_setup.compile_system_trunk), never
+by build_system.
 
 Projects that want a different composition (e.g. a diffusion head, or multiple heads)
 write their own System satisfying the same `loss(batch)` contract — core does not
@@ -32,11 +34,19 @@ class LMSystem(nn.Module):
         object.__setattr__(self, "_compiled_trunk", None)
 
     def set_compiled_trunk(self, compiled_trunk):
-        """Register a torch.compile'd view of the trunk for the hot training path.
+        """Register a torch.compile'd view of the trunk for the hot training path
+        (`_run_trunk`); None puts the eager trunk back.
 
         Not stored as a submodule: it shares parameters with the already-registered
         raw trunk, so registering it would double-count params in state_dict().
+        Refuses to overwrite a registered wrapper with another one: that is either
+        wrapping the wrapper or two decision sites both compiling. Clear with None
+        first when a switch is really meant (frontier_arch/scripts/nan_repro.py does).
         """
+        if compiled_trunk is not None and self._compiled_trunk is not None:
+            raise RuntimeError(
+                "set_compiled_trunk: a compiled trunk is already registered; compile "
+                "it once. Pass None first to deliberately replace it.")
         object.__setattr__(self, "_compiled_trunk", compiled_trunk)
 
     @property

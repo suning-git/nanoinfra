@@ -4,7 +4,8 @@ Model setup for distributed training.
 Provides hardware deployment layer for:
 - Distributed initialization (multi-GPU)
 - Model creation with FSDP or replicated (DDP) placement
-- Model compilation
+- Trunk compilation MECHANISMS (whole trunk, or per block); whether to use one,
+  and which, is the caller's decision after assembly
 
 Note: nanoinfra is designed for CUDA training only.
 
@@ -18,11 +19,15 @@ block per step and buys nothing, because at that size the memory bottleneck is
 activations rather than parameters (measured on 2x5090, 233M params: FSDP 93.6k
 tok/s / 30GB against replicated 106.2k tok/s / 19GB).
 
-2. `compile_blocks(trunk)` compiles each block separately rather than the trunk as
-one graph. It is a free function rather than a build_system flag because WHETHER to
-compile per block follows from how the caller synchronizes gradients, which this
-function does not know — but it is mechanism, so it belongs beside the other
-assembly mechanics rather than copy-pasted into every orchestrator.
+2. `build_system` does NOT compile the trunk. Two mechanisms sit beside it and the
+orchestrator calls ONE of them after assembly, once it knows world_size and how it
+synchronizes gradients: `compile_system_trunk(system, ...)`
+compiles the trunk as a whole and registers the wrapper with the System;
+`compile_blocks(trunk)` compiles each block separately, in place. They are free
+functions rather than build_system flags because WHETHER to compile, and which way,
+follows from facts this function does not know — but they are mechanism, so they
+belong beside the other assembly mechanics rather than copy-pasted into every
+orchestrator.
 """
 
 import os
@@ -106,8 +111,10 @@ def init_distributed(seed: int = 42):
 
 def compile_blocks(trunk, dynamic=None):
     """Compile each transformer block separately, in place, instead of the trunk as
-    a whole. Use with replicated data parallel; pass use_compile=False to
-    build_system so the trunk is not also compiled as one graph.
+    a whole. Use with replicated data parallel (why: below). build_system does not
+    compile the trunk; the orchestrator calls this OR compile_system_trunk, not both
+    (only the per-block-then-whole order is detected — this function sees the trunk,
+    not the System, so it cannot tell that a whole-trunk wrapper is already registered).
 
     `dynamic` is forwarded to torch.compile. None (default) lets dynamo decide;
     False pins static shapes, which is worth a few percent on architectures whose
@@ -140,13 +147,43 @@ def compile_blocks(trunk, dynamic=None):
                 "compile_blocks: these blocks are already compiled. Calling it twice "
                 "would wrap the wrapper; call it once.")
         block.forward = torch.compile(block.forward, dynamic=dynamic)
+    print0(f"trunk compile: per-block, dynamic={dynamic}")   # the action, not a status
     return trunk
 
 
-def build_system(trunk_cls, config, use_compile=True, head_softcap=15.0, seed=42,
+def compile_system_trunk(system, **compile_kwargs):
+    """Compile the trunk as a whole and register the wrapper for the System's hot
+    path (LMSystem._run_trunk). The thin counterpart of compile_blocks: after
+    build_system returns, the orchestrator calls one of the two — or neither.
+
+    `compile_kwargs` go to torch.compile unchanged (dynamic=..., mode=..., ...): the
+    text exemplars use dynamic=True, nano-dsv4 dynamic=False, the bench mode=...
+
+    Only consumed by loss paths that go through `_run_trunk`. A System whose loss
+    calls `self.trunk(...)` or loops over the blocks itself (the block-diffusion
+    Systems) never sees the wrapper — those use compile_blocks, which rebinds each
+    block's own forward and so travels with the modules wherever they are reused.
+
+    Refuses a trunk whose blocks are already compiled per block (stacking the two
+    mechanisms would trace a compiled callable inside a compiled callable); a second
+    whole-trunk registration is refused by set_compiled_trunk itself. The reverse
+    order — this first, compile_blocks after — is NOT detected (compile_blocks only
+    sees the trunk); the rule is still one mechanism per trunk.
+    """
+    for block in system.trunk.blocks:
+        if getattr(block.forward, "_torchdynamo_orig_callable", None) is not None:
+            raise RuntimeError(
+                "compile_system_trunk: the blocks are already compiled per block "
+                "(compile_blocks). Pick ONE mechanism for a trunk.")
+    print0(f"trunk compile: whole, {compile_kwargs or 'torch.compile defaults'}")
+    system.set_compiled_trunk(torch.compile(system.trunk, **compile_kwargs))
+    return system
+
+
+def build_system(trunk_cls, config, head_softcap=15.0, seed=42,
                  parallel="fsdp", head_ce="naive"):
     """
-    Assemble the LMSystem (trunk + head) with FSDP and compile.
+    Assemble the LMSystem (trunk + head) with FSDP. The trunk is NOT compiled here.
 
     WHICH model is the orchestrator's decision — it imports the trunk class and
     passes it here (e.g. `build_system(GPT, gpt_config)`). HOW to assemble it
@@ -155,7 +192,9 @@ def build_system(trunk_cls, config, use_compile=True, head_softcap=15.0, seed=42
 
     construct -> init -> INJECT behavior family (__class__, before shard) -> shard
     (blocks, trunk, head) -> register head's extra forward methods (after shard) ->
-    wrap in LMSystem -> compile the trunk.
+    wrap in LMSystem. Compiling the trunk is the caller's NEXT line, once it knows
+    world_size and its gradient-sync mechanism: compile_system_trunk (whole) or
+    compile_blocks (per block).
 
     Trunk contract (see GPT for the reference implementation): __init__(config),
     init_weights(), forward(idx, ...) -> hidden [B,T,H], `blocks` (per-layer
@@ -171,12 +210,10 @@ def build_system(trunk_cls, config, use_compile=True, head_softcap=15.0, seed=42
     Args:
         trunk_cls: The trunk class to instantiate (the orchestrator's choice).
         config: trunk_cls's config instance (n_embd/vocab_size size the head)
-        use_compile: Whether to compile the trunk (default: True)
-        head_ce: which implementation computes head.loss. Three answers to ONE
-            question — that [B,T,V] logits tensor: pay for it, dodge it with a
-            hand-written triton kernel, or dodge it with inductor. Not two axes:
-            compiling around liger is both pointless (its fusion is already done in
-            the kernel) and, measured, an InductorError. The head is a real fraction
+        head_ce: which CE implementation the head uses: eager PyTorch, a Liger fused
+            kernel, or compiled PyTorch. This is one choice, not separate flags for
+            kernel selection and compilation. Compiling around liger raised an
+            InductorError on the measured stack. The head is a real fraction
             of a SMALL model's step (the un-embedding outweighs a shallow trunk), so
             this is a throughput knob, not a detail. Measured on one RTX 5090,
             vocab 32768, seq 1024, batch 32 — MFU for naive/liger/compiled:
@@ -189,18 +226,29 @@ def build_system(trunk_cls, config, use_compile=True, head_softcap=15.0, seed=42
             29% at d8. Peak memory ranks the other way round — liger lowest, naive
             highest, compiled between.
             "naive" (default) F.cross_entropy over materialized [B,T,V] fp32 logits.
-                       The default is DERIVED, not preferred: compiling is the
-                       CALLER's decision, not core's (see compile_blocks below), so
-                       core's default cannot be a compiling one. It is also the only
-                       value that depends on no optional package — which environment
-                       a run lands on must never decide its loss trajectory.
-            "liger"    fused linear+CE; never materializes logits. Lowest memory.
+                       The default is a POLICY, not a theorem:
+                       it depends on no optional package (which environment a run
+                       lands on must never decide its loss trajectory), it is the
+                       plain numeric reference for the other two, and it starts
+                       no compilation — in line with compiling being the caller's
+                       decision. A project may well make liger or compiled ITS default.
+            "liger"    fused linear+CE in token chunks, avoiding the full [B,T,V]
+                       allocation. Lowest peak memory in the measured configurations.
                        Errors if liger_kernel is absent rather than falling back —
                        an arm that silently becomes another arm is not an arm.
-            "compiled" the same math as naive in one dynamo frame; inductor tiles the
-                       vocab dimension, so the logits never materialize. Fastest at
-                       every depth measured, and numerically the closest to naive.
+            "compiled" the same math as naive in one dynamo frame. Measured peak
+                       2.16 / 1.20 / 0.76 GiB at N = 32k / 16k / 8k tokens, V = 32768,
+                       i.e. about N·V·2 bytes plus a constant — consistent with the bf16
+                       projection materializing and the fp32 logits / softmax
+                       intermediates not (inferred from the peaks; the generated code
+                       was not inspected). Holds at V = 32768 (1.05x); at V = 96787 the
+                       peak is about 2x N·V·2 (measured 2026-09-11) — a vocab-dependent
+                       reading, not a formula. Fastest at every depth measured, and
+                       numerically the closest to naive.
                        Works under all three placements (single / ddp / fsdp).
+            `head.loss_per_token` (unreduced CE, for an objective that weights tokens
+            itself) follows the same choice, naive or compiled; the liger arm refuses
+            it — see LigerLMHead.loss_per_token.
         head_softcap: logit softcap for the LM head
         seed: RNG seed for init + training reproducibility (config key `seed`)
         parallel: which MULTI-DEVICE strategy to use. Ignored on one device — whether
@@ -277,15 +325,17 @@ def build_system(trunk_cls, config, use_compile=True, head_softcap=15.0, seed=42
         # Head: its own shard group (a separate FSDP root).
         fully_shard(head, mesh=mesh, mp_policy=mp)
 
-        # loss()/type_losses() touch head params OUTSIDE the trunk forward, so each
-        # needs its own FSDP window. register_fsdp_forward_method REQUIRES the head to
-        # already be an FSDPModule — assert loudly, because otherwise it SILENTLY
-        # no-ops and multi-GPU reads sharded params (wrong results, no error).
+        # loss()/loss_per_token()/type_losses() touch head params OUTSIDE the trunk
+        # forward, so each needs its own FSDP window. register_fsdp_forward_method
+        # REQUIRES the head to already be an FSDPModule — assert loudly, because
+        # otherwise it SILENTLY no-ops and multi-GPU reads sharded params (wrong
+        # results, no error).
         assert isinstance(head, FSDPModule), (
             "head must be fully_shard'd BEFORE register_fsdp_forward_method — "
             "otherwise the registration silently no-ops"
         )
         register_fsdp_forward_method(head, "loss")
+        register_fsdp_forward_method(head, "loss_per_token")
         register_fsdp_forward_method(head, "type_losses")
     elif parallel == "ddp":
         # Replicate. Deliberately nothing else: the replicas already agree because
@@ -311,11 +361,9 @@ def build_system(trunk_cls, config, use_compile=True, head_softcap=15.0, seed=42
     param_count = sum(p.numel() for p in system.parameters()) / 1e9
     print0(f"Model parameters: {param_count:.2f}B")
 
-    # Compile only the trunk (head stays eager — liger is a fused kernel, and an
-    # independent frame anyway). The compiled view is held off the module registry.
-    if use_compile:
-        print0("Compiling trunk (JIT on first forward)...")
-        system.set_compiled_trunk(torch.compile(trunk, dynamic=True))
+    # The trunk is NOT compiled here. Whether, and whole vs per block, is the
+    # orchestrator's decision once it knows world_size and how it synchronizes
+    # gradients: compile_system_trunk / compile_blocks, after this returns (H9).
 
     if head_ce == "compiled":
         # Bound as an INSTANCE attribute, which is also what keeps it out of
@@ -324,6 +372,11 @@ def build_system(trunk_cls, config, use_compile=True, head_softcap=15.0, seed=42
         # one path pinned back to the eager class method (see heads.py), so a per-type
         # eval does not drag eval-shaped batches into dynamo.
         head.loss = torch.compile(head.loss)
+        # The unreduced entry sees a different N on every call (block diffusion masks
+        # a random number of positions per batch, each position its own Bernoulli
+        # draw), so it is dynamic from the start rather than one static graph, a
+        # recompile, then dynamic.
+        head.loss_per_token = torch.compile(head.loss_per_token, dynamic=True)
 
     return {
         'system': system,
@@ -335,15 +388,15 @@ def build_system(trunk_cls, config, use_compile=True, head_softcap=15.0, seed=42
 
 
 def load_system(checkpoint_dir, trunk_cls=GPT, sequence_len=None,
-                use_compile=False, head_softcap=15.0, head_ce="naive"):
+                head_softcap=15.0, head_ce="naive"):
     """Assemble a runnable System straight from a self-describing checkpoint.
 
     The standard inference entry: blueprint from the artifact
     (config_from_meta reads meta.json['model_config'] into trunk_cls.Config),
     assembly through the SAME path training uses, weights via DCP (validated
     against the recorded config), eval() mode. Instantiation choices stay with
-    the caller: sequence_len (defaults to the trained value), use_compile, head_ce
-    head_softcap.
+    the caller: sequence_len (defaults to the trained value), head_ce, head_softcap.
+    The trunk comes back eager; compiling it, if wanted, is the caller's next line.
 
     trunk_cls is a CHECKED default: which code to load is the caller's
     decision, what the checkpoint was trained with is the artifact's recorded
@@ -379,8 +432,7 @@ def load_system(checkpoint_dir, trunk_cls=GPT, sequence_len=None,
         raise ValueError(
             f"{checkpoint_dir} has no model_config in meta.json (checkpoint predates "
             f"self-description) — construct the config yourself and use load_model_only")
-    setup = build_system(trunk_cls, config, use_compile=use_compile, head_ce=head_ce,
-                         head_softcap=head_softcap)
+    setup = build_system(trunk_cls, config, head_ce=head_ce, head_softcap=head_softcap)
     load_model_only(checkpoint_dir, setup['system'],
                     rank=setup['rank'], world_size=setup['world_size'])
     setup['system'].eval()

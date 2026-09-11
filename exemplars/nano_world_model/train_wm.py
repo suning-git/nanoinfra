@@ -20,7 +20,7 @@ like next", which is what makes it a world model rather than a video generator.
 
 Usage:
     python -m exemplars.nano_world_model.train_wm
-    python -m exemplars.nano_world_model.train_wm max_steps=200 use_compile=false
+    python -m exemplars.nano_world_model.train_wm max_steps=200 compile_trunk=false
     torchrun --nproc_per_node=2 --standalone \
         -m exemplars.nano_world_model.train_wm parallel=ddp
 
@@ -141,11 +141,12 @@ def main(cfg: DictConfig) -> None:
         n_embd=model_config["dim"],
         n_token_types=layout.n_token_types,
     )
-    # head_ce reaches the AR arm only (autoregressive.py calls system.head.loss); the
-    # block-diffusion arm computes its own compiled CE over the masked positions and
-    # never touches the head module.
-    setup = build_system(GPT, gpt_config, use_compile=False,     # compiled per block below
-                         head_ce="liger",
+    # Diffusion weights loss_per_token by 1/t and uses compiled CE to reduce peak
+    # memory. Liger cannot provide that weighted backward. AR uses mean-reduced
+    # loss and keeps liger for its lower peak memory in both training and CE eval.
+    head_ce = "compiled" if obj_name == "diffusion" else "liger"
+    setup = build_system(GPT, gpt_config,     # trunk compiled per block below
+                         head_ce=head_ce,
                          seed=config["seed"], parallel=config["parallel"])
     base, rank, world_size = setup["system"], setup["rank"], setup["world_size"]
     device = setup["device"]
@@ -174,7 +175,7 @@ def main(cfg: DictConfig) -> None:
     install_rope3d(system.trunk, rows)
     if obj_name == "diffusion":
         rows.install_mirror_rope(system.trunk)
-    if config.get("use_compile", True):
+    if config.get("compile_trunk", True):
         compile_blocks(system.trunk)
 
     # --- data -----------------------------------------------------------------

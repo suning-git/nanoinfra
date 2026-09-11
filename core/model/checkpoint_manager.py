@@ -2,8 +2,14 @@
 Checkpoint management for FSDP models.
 
 Provides:
-- Low-level DCP functions (save_checkpoint_dcp, load_checkpoint_dcp, find_latest_checkpoint)
-- High-level checkpoint saving (save_checkpoint_if_needed) for core training
+- DCP entries named by intent: save_checkpoint_dcp (write), load_checkpoint_dcp
+  (restore weights + optimizer = a resume), load_model_only (restore weights = an
+  init). Around them: metadata recovery and validation (load_metadata,
+  get_model_config, config_from_meta, _validate_model_config), source resolution
+  (resolve_checkpoint_path, find_latest_checkpoint — see smart_checkpoint_resume.md)
+  and retention (should_save_checkpoint, cleanup_old_checkpoints)
+- High-level saving (save_checkpoint_if_needed) and loading (load_checkpoint_if_needed)
+  for core training
 """
 
 import os
@@ -98,19 +104,23 @@ def save_checkpoint_dcp(
 def load_checkpoint_dcp(
     checkpoint_dir: str,
     model,
-    load_optimizer: bool = False,
-    optimizers: Optional[List] = None,
+    optimizers: List,
     rank: int = 0,
     world_size: int = 1,
 ) -> Dict[str, Any]:
     """
-    Load FSDP checkpoint using DCP.
+    Load an FSDP checkpoint using DCP: model weights AND optimizer state (a resume).
+
+    For weights-only initialization, call `load_model_only`. This loader restores
+    stored state; the caller owns hyperparameter overrides and LR scheduling.
 
     Args:
         checkpoint_dir: Directory containing checkpoint
         model: FSDP model (will be filled with loaded weights)
-        load_optimizer: Whether to load optimizer state
-        optimizers: List of optimizers to load into (if load_optimizer=True)
+        optimizers: Non-empty list or tuple of optimizers to restore into.
+            Restores accumulated state (moments, step counts) and group settings,
+            including initial_lr, weight_decay, betas, eps and transient lr.
+            Core Trainer recomputes lr from initial_lr before its next update.
         rank: Current rank
         world_size: Total number of ranks
 
@@ -119,23 +129,35 @@ def load_checkpoint_dcp(
 
     Side effects:
         - model parameters are updated in-place
-        - optimizer states are updated in-place (if load_optimizer=True)
+        - optimizer states and param_groups are updated in-place
 
     Raises:
-        ValueError: If checkpoint model_config doesn't match model's config
+        ValueError: If optimizers is not a non-empty list or tuple, or if the checkpoint's
+            model_config doesn't match the model's config
+        torch.distributed.checkpoint.api.CheckpointException: DCP restores the
+            param_group keys the LIVE optimizer has, key by key; a key the live
+            optimizer has and the checkpoint lacks (a checkpoint from before the
+            builder pinned initial_lr, or a torch upgrade adding a group key) aborts
+            the load with "Missing key in checkpoint state_dict". That exception
+            subclasses BaseException, not Exception. Checkpoint-only keys are dropped.
     """
+    if not isinstance(optimizers, (list, tuple)) or len(optimizers) == 0:
+        raise ValueError(
+            "load_checkpoint_dcp restores model + optimizer state and needs a non-empty "
+            "list of optimizers (a generator would be consumed by get_state_dict and "
+            "leave the optimizer silently unrestored); for weights only call load_model_only")
+
     # Validate model config before loading
     _validate_model_config(checkpoint_dir, model, rank)
 
     # Use get_state_dict() to create proper template structure
     # This handles fresh optimizers correctly by constructing the full state structure
-    opt_list = optimizers if (load_optimizer and optimizers is not None) else None
-    model_state_dict, optim_state_dict = get_state_dict(model, opt_list)
+    model_state_dict, optim_state_dict = get_state_dict(model, optimizers)
 
     # Build state_dict for DCP load
     state_dict = {
         "model": model_state_dict,
-        "optimizer": optim_state_dict if load_optimizer else None,
+        "optimizer": optim_state_dict,
     }
 
     # DCP load (all ranks participate, each reads its own shard)
@@ -148,9 +170,9 @@ def load_checkpoint_dcp(
     # This handles DTensor conversion and optimizer state restoration correctly
     set_state_dict(
         model,
-        opt_list,
+        optimizers,
         model_state_dict=state_dict["model"],
-        optim_state_dict=state_dict.get("optimizer") if load_optimizer else None,
+        optim_state_dict=state_dict["optimizer"],
     )
 
     # Load custom metadata
@@ -644,7 +666,6 @@ def load_checkpoint_if_needed(
             metadata = load_checkpoint_dcp(
                 checkpoint_dir=resolved_path,
                 model=model,
-                load_optimizer=True,
                 optimizers=optimizers,
                 rank=rank,
                 world_size=world_size,

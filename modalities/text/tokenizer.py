@@ -502,13 +502,25 @@ def get_token_bytes(device="cpu"):
 
     tokenizer_dir = os.environ.get("NANOINFRA_TOKENIZER_DIR") or os.path.join(get_base_dir(), "tokenizer")
     token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
-    if os.path.exists(token_bytes_path):
-        with open(token_bytes_path, "rb") as f:
-            return torch.load(f, map_location=device)
-
-    tokenizer = get_tokenizer()
-    print(f"WARNING: token_bytes.pt not found in {tokenizer_dir} — falling back to a "
-          f"ones table: any 'bpb' metric will be bits-per-TOKEN, not bits/byte. "
-          f"Build the real table (len(tok.decode([i]).encode('utf-8')) per id, "
-          f"control band = 0) and save it as token_bytes.pt there.")
-    return torch.ones(tokenizer.get_vocab_size(), dtype=torch.long, device=device)
+    # A missing table used to become a ones table under a WARNING, so downstream
+    # `bpb` silently became bits per TOKEN (public issue #6). Existing tables were
+    # loaded without a vocabulary-size check; both cases are now checked here.
+    if not os.path.exists(token_bytes_path):
+        raise FileNotFoundError(
+            f"token_bytes.pt not found in {tokenizer_dir}: bpb needs the per-token UTF-8 "
+            f"byte table. Build it with modalities.text.train_tokenizer.build_token_bytes("
+            f"RustBPETokenizer.from_directory(dir)) and torch.save it as token_bytes.pt "
+            f"there. Do NOT derive it from len(tok.decode([i]).encode()): decoding a "
+            f"partial UTF-8 token alone yields U+FFFD and inflates the count (the "
+            f"2026-09-11 table fix). Streams that do not declare bpb_metric never load it.")
+    with open(token_bytes_path, "rb") as f:
+        table = torch.load(f, map_location=device)
+    vocab_size = get_tokenizer().get_vocab_size()
+    if table.ndim != 1 or table.numel() != vocab_size \
+            or table.dtype not in (torch.int64, torch.int32, torch.int16, torch.uint8):
+        raise ValueError(
+            f"token_bytes.pt in {tokenizer_dir} is {tuple(table.shape)} {table.dtype} but the "
+            f"tokenizer's vocab is {vocab_size} (expected a 1-D integer table of that length): "
+            f"the table belongs to a different tokenizer or was built wrong. Rebuild it with "
+            f"build_token_bytes for this one.")
+    return table

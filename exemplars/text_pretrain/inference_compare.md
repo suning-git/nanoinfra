@@ -34,7 +34,7 @@ Reproduce (each rung = the same spec with a max_steps override):
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 .venv/bin/torchrun --nproc_per_node=2 --standalone \
   -m modalities.text.train_text model.depth=12 max_steps=<150|1000|8400> \
-  use_compile=true checkpoint.enabled=true checkpoint.save_dir=<dir> \
+  compile_trunk=true checkpoint.enabled=true checkpoint.save_dir=<dir> \
   checkpoint.save_every=<150|500|2800> checkpoint.keep_last_n=1
 # 2.7B rung: pretrain.py (stage 1). Generation: inference.py's prompts/seed
 # via load_system(<ckpt>, sequence_len=256) per checkpoint.

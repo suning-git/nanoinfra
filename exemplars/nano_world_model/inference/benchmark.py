@@ -55,7 +55,7 @@ def build(args, layout):
     cfg = GPTConfig(sequence_len=args.seq_len, vocab_size=layout.vocab_size,
                     n_layer=args.depth, n_head=args.n_head, n_kv_head=args.n_head,
                     n_embd=args.dim, n_token_types=layout.n_token_types)
-    return build_system(GPT, cfg, use_compile=False, seed=0)["system"]
+    return build_system(GPT, cfg, seed=0)["system"]
 
 
 @torch.no_grad()

@@ -14,13 +14,14 @@ Behavior families (naive CE / Liger fused CE / future band-factorized) are chose
 `__class__` INJECTION at assembly time (`XXXHead.setup(head)`), BEFORE `fully_shard`,
 once. Runtime never changes `__class__`.
 
-One family is NOT a class: head_ce="compiled" keeps the naive class and binds a
-compiled `loss` as an INSTANCE attribute instead — `torch.compile` produces a
-callable, not a type, so there is nothing to inject. That asymmetry is why
+One family is NOT a class: head_ce="compiled" keeps the naive class and binds
+compiled `loss` and `loss_per_token` as INSTANCE attributes instead — `torch.compile`
+produces a callable, not a type, so there is nothing to inject. That asymmetry is why
 `type_losses` below reaches for `type(self).loss` rather than `self.loss`.
 
-Entry points that touch head params outside the trunk forward
-(loss / logits / type_losses) are registered as FSDP forward methods AFTER shard.
+FSDP handles `head(hidden)` through its standard forward hooks. The additional parameter-using
+entry points (loss / loss_per_token / type_losses) are registered as FSDP forward
+methods AFTER shard.
 
 FSDP2 timing rule (why the order matters): the `__class__` injection MUST happen
 BEFORE `fully_shard` — a post-shard `__class__` swap silently drops FSDP's dynamically
@@ -57,9 +58,9 @@ class LMHead(nn.Module):
     """Linear un-embedding + softcap; naive (F.cross_entropy) loss path.
 
     Tensor-level building block: methods take (hidden, targets), NOT a batch dict.
-    Batch unpacking lives one level up in LMSystem. All three entry points below are
-    called OUTSIDE the trunk forward, so under FSDP each must be registered via
-    register_fsdp_forward_method (done in model_setup after shard).
+    Batch unpacking lives one level up in LMSystem. The head has its own FSDP root:
+    head(hidden) uses the standard hooks; model_setup registers loss(), loss_per_token()
+    and type_losses() as additional forward methods after sharding.
     """
 
     def __init__(self, n_embd, vocab_size, softcap=15.0):
@@ -84,6 +85,24 @@ class LMHead(nn.Module):
             targets.reshape(-1),
             ignore_index=VocabLayout.IGNORE_INDEX,
             reduction="mean",
+        )
+
+    def loss_per_token(self, hidden, targets):
+        """Unreduced CE: hidden [..., H], targets [...] -> flattened [N].
+
+        IGNORE_INDEX positions return zero. The caller selects tokens, applies
+        weights and chooses the final reduction.
+
+        The naive path materializes full logits. head_ce="compiled" compiles this
+        method with dynamic N support and can reduce peak memory; the saving depends
+        on tensor shapes and the PyTorch stack. Liger currently rejects this entry.
+        """
+        logits = self.forward(hidden)
+        return F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            targets.reshape(-1),
+            ignore_index=VocabLayout.IGNORE_INDEX,
+            reduction="none",
         )
 
     def type_losses(self, hidden, targets, target_types, type_ids):
@@ -117,11 +136,12 @@ class LMHead(nn.Module):
 
 
 class LigerLMHead(LMHead):
-    """Liger fused-CE loss path (memory-safe: never materializes [B,T,V] logits).
+    """Liger fused linear CE computes loss in chunks to reduce peak memory.
 
     Selected by injection: `LigerLMHead.setup(head)` prepares `fused_ce` and swaps
-    `__class__`. MUST run BEFORE `fully_shard(head)`. Only the training `loss()` is
-    replaced; `forward()`/`type_losses()` inherit LMHead's logits path.
+    `__class__`. MUST run BEFORE `fully_shard(head)`. forward() keeps LMHead's logits
+    path; the inherited type_losses() dispatches to this class's loss() per type.
+    loss_per_token() is refused (below).
     """
 
     @classmethod
@@ -140,3 +160,14 @@ class LigerLMHead(LMHead):
                 targets.reshape(-1),
             )
         return LMHead.loss(self, hidden, targets)  # cpu fallback
+
+    def loss_per_token(self, hidden, targets):
+        """Reject unreduced CE: the current fused backward cannot honor nonuniform
+        per-token upstream gradients. A silent eager fallback would change the
+        selected implementation and its memory cost. Use head_ce="compiled" for
+        objectives that need this entry.
+        """
+        raise NotImplementedError(
+            "LigerLMHead.loss_per_token: liger's reduction='none' backward drops the "
+            "per-token upstream weights (loss right, gradient wrong); build with "
+            "head_ce='compiled' for an unreduced CE")

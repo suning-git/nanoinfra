@@ -57,7 +57,7 @@ spec.pin_tokenizer()                                          # MUST precede mod
 
 from core.model.gpt import GPT                                # noqa: E402
 from core.parallel import NanoDDP, block_buckets              # noqa: E402
-from core.training.model_setup import build_system, compile_blocks  # noqa: E402
+from core.training.model_setup import build_system, compile_blocks, compile_system_trunk  # noqa: E402
 from core.training.trainer import create_optimizers           # noqa: E402
 from core.utils import print0                                 # noqa: E402
 
@@ -133,16 +133,21 @@ def main(cfg: DictConfig) -> None:
     # --- 2. model: the same GPT + LMHead on every line -----------------------
     gpt_config = assembly.gpt_config_for(config, vocab)
     parallel = config.get("parallel", "ddp")
-    # Per-block compile under DDP is not a style choice: a whole-graph compile makes
-    # AOTAutograd finalize every gradient at the very END of backward (pytorch#109774),
-    # so every all_reduce piles up after the compute instead of overlapping it.
-    whole_graph = config.get("use_compile", True) and parallel != "ddp"
-    setup = build_system(GPT, gpt_config, use_compile=whole_graph, parallel=parallel,
+    setup = build_system(GPT, gpt_config, parallel=parallel,
                          head_ce=config.get("head_ce", "naive"),
                          seed=config.get("seed", spec.SEED))
     system, rank, world_size = setup["system"], setup["rank"], setup["world_size"]
-    if config.get("use_compile", True) and parallel == "ddp":
-        compile_blocks(system.trunk)
+    # Same rule as modalities/text/train_text.py, decided here with world_size known:
+    # per block under NanoDDP (a whole-trunk compile makes AOTAutograd finalize every
+    # gradient at the END of backward, pytorch#109774, so no all_reduce overlaps), the
+    # whole trunk otherwise. NOTE (2026-09-10): on ONE device with parallel=ddp this
+    # used to compile per block; it now takes the whole trunk like text — a deliberate
+    # alignment, not a consequence of the API change.
+    if config.get("compile_trunk", True):
+        if world_size > 1 and parallel == "ddp":
+            compile_blocks(system.trunk)
+        else:
+            compile_system_trunk(system, dynamic=True)
 
     ddp = None
     if world_size > 1 and parallel == "ddp":

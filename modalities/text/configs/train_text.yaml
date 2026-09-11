@@ -45,7 +45,8 @@ model:
                                 #   satisfies the trunk contract — e.g. an architecture ablation.
 
 max_steps: -1                   # auto (Chinchilla, target_param_data_ratio) unless overridden
-use_compile: true               # audit: +19-34% tok/s; keep on
+compile_trunk: true             # audit: +19-34% tok/s; keep on. The script decides HOW after assembly
+                                #   (whole trunk, or per block under NanoDDP); head_ce picks the head's CE.
 
 # Which implementation computes the head's cross-entropy: naive | liger | compiled.
 # It matters most where the model is SMALL — a shallow trunk is outweighed by its own

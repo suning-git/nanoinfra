@@ -25,7 +25,7 @@ Usage (module entry, runnable from anywhere — the editable install resolves it
 
     python -m modalities.text.train_text
     python -m modalities.text.train_text model.depth=12 max_steps=100
-    python -m modalities.text.train_text use_compile=false wandb.enabled=true
+    python -m modalities.text.train_text compile_trunk=false wandb.enabled=true
     torchrun --nproc_per_node=2 --standalone -m modalities.text.train_text
 
 Config: modalities/text/configs/train_text.yaml (co-located; inherits mechanism
@@ -63,7 +63,7 @@ class _CoreConfigs(SearchPathPlugin):
 
 Plugins.instance().register(_CoreConfigs)
 
-from core.training.model_setup import build_system, compile_blocks, print0
+from core.training.model_setup import build_system, compile_blocks, compile_system_trunk, print0
 from core.parallel import NanoDDP, block_buckets
 from core.training.trainer import Trainer, create_optimizers
 from core.model.gpt import GPT, GPTConfig  # WHICH model = this orchestrator's decision
@@ -169,23 +169,28 @@ def main(cfg: DictConfig) -> None:
     # earns its keep when the model stops fitting. Ignored on a single GPU.
     parallel = config.get('parallel', 'fsdp')
 
-    # Per-block compile under DDP is not a style choice. A whole-graph compile makes
-    # AOTAutograd finalize every gradient at the very END of backward (pytorch#109774),
-    # so every all_reduce piles up after the compute instead of overlapping it. Compiling
-    # each block separately leaves the seams where the gradient hooks can fire.
-    whole_graph_compile = config.get('use_compile', True) and parallel != 'ddp'
-    setup = build_system(trunk_cls, gpt_config, use_compile=whole_graph_compile,
-                                                parallel=parallel,
-                                                head_ce=config.get('head_ce', 'naive'),
-                                                seed=config.get('seed', 42))
+    setup = build_system(trunk_cls, gpt_config, parallel=parallel,
+                         head_ce=config.get('head_ce', 'naive'),
+                         seed=config.get('seed', 42))
     system = setup['system']
     rank = setup['rank']
     world_size = setup['world_size']
 
+    # Trunk compilation is decided HERE, after assembly and with world_size known —
+    # build_system does not compile. Per-block under NanoDDP is
+    # not a style choice: a whole-trunk compile makes AOTAutograd finalize every
+    # gradient at the very END of backward (pytorch#109774), so every all_reduce piles
+    # up after the compute instead of overlapping it; compiling each block separately
+    # leaves the seams where the gradient hooks fire. Every other placement — one
+    # device whatever `parallel` says, or FSDP — takes the whole trunk.
+    if config.get('compile_trunk', True):
+        if world_size > 1 and parallel == 'ddp':
+            compile_blocks(system.trunk)
+        else:
+            compile_system_trunk(system, dynamic=True)
+
     ddp = None
     if world_size > 1 and parallel == 'ddp':
-        if config.get('use_compile', True):
-            compile_blocks(system.trunk)
         # Bucket ORDER is part of NanoDDP's contract: NCCL pairs collectives by issue
         # order, so every rank must issue them in the same sequence. block_buckets()
         # returns completion order (last block first); the LM head completes before any

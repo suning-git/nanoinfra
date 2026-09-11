@@ -25,18 +25,14 @@ such a System's checkpoints stay interchangeable with any other over the same tr
 
 import math
 import os
+import re
 import time
 
-try:
-    import wandb
-except ImportError:
-    wandb = None
-
-import re
 import torch
 
 from core.utils import print0, DummyWandb
 from core.training.lr_schedulers import get_lr_multiplier
+from core.training.optim_resume import ADJUSTABLE, reconcile_hparams, snapshot_hparams
 from core.parallel import sync_gradients
 
 
@@ -351,7 +347,12 @@ class Trainer:
         self.profile_memory = profiling_config.get('profile_memory', False)
         self.profiler = None
 
-        # Load checkpoint if needed (resume or init)
+        # Preserve this launch's group values before a resume replaces them.
+        # After loading, check consistency or adopt those values as requested.
+        hparams_before = snapshot_hparams(self.optimizers)
+        adopt = self.checkpoint_config.get('override_optimizer_hparams', False)
+        if not isinstance(adopt, bool):
+            raise TypeError(f"checkpoint.override_optimizer_hparams must be true or false, got {adopt!r}")
         from core.model.checkpoint_manager import load_checkpoint_if_needed
         self.start_step, self._resumed_trainer_state = load_checkpoint_if_needed(
             checkpoint_config=self.checkpoint_config,
@@ -361,6 +362,34 @@ class Trainer:
             rank=self.rank,
             world_size=self.world_size,
         )
+        self._resume_changes = []
+        if self.start_step > 0:
+            self._resume_changes = reconcile_hparams(self.optimizers, hparams_before, adopt=adopt)
+            if self.master_process:
+                self._print_resume_info(adopt)
+
+    def _print_resume_info(self, adopt):
+        """The hyperparameters that will actually train, read from the live optimizers."""
+        print0(f"Optimizer hyperparameters after resume (override_optimizer_hparams={adopt}):")
+        for i, opt in enumerate(self.optimizers):
+            for j, g in enumerate(opt.param_groups):
+                vals = ", ".join(f"{k}={g[k]:.6g}" if isinstance(g[k], float) else f"{k}={g[k]!r}"
+                                 for k in ADJUSTABLE if k in g)
+                print0(f"  optimizer[{i}].param_groups[{j}] ({len(g['params'])} tensors): {vals}")
+        for i, j, k, old, new in self._resume_changes:
+            print0(f"  adopted this launch's optimizer[{i}].param_groups[{j}].{k}: {old!r} -> {new!r}")
+        if not self._resume_changes:
+            print0("  no change" + (" (override on, nothing differed)" if adopt else ""))
+        sc = self.scheduler_config
+        warmdown = (f" warmdown_ratio={sc.get('warmdown_ratio', 0.2)}"
+                    if sc.get('type', 'linear') == 'linear' else "")
+        if self.start_step < self.max_steps:
+            nxt = f"LR multiplier at step {self.start_step} = {get_lr_multiplier(self.start_step, sc):.4f}"
+        else:   # No upcoming update: skip evaluating the schedule outside the training budget.
+            nxt = f"start step {self.start_step} is at/after max_steps, nothing to train"
+        print0(f"  schedule this launch: {sc.get('type', 'linear')} max_steps={self.max_steps} "
+               f"warmup_steps={sc.get('warmup_steps', 0)}{warmdown} "
+               f"final_lr_frac={sc.get('final_lr_frac', 0.0)}; {nxt}\n")
 
     def train(self):
         """
@@ -371,8 +400,9 @@ class Trainer:
         # Print training info
         self._print_training_info()
 
-        # Initialize wandb
-        wandb_run = self._init_wandb()
+        # Metrics sink: one object, .log(dict) / .finish(). Rank 0 only — the other
+        # ranks get the no-op here, so an override need not check the rank itself.
+        metrics_run = self._init_metrics() if self.master_process else DummyWandb()
 
         # Training setup
         self.system.train()
@@ -450,7 +480,7 @@ class Trainer:
             # if step == 10 and self.device_type == 'cuda':
             #     self._debug_print_gpu_memory(step)
 
-            # Wandb logging
+            # Metrics (the same dict goes to whatever _init_metrics returned)
             if step % self.wandb_log_every == 0 or step == self.max_steps - 1:
                 metrics = self._calculate_metrics(step, dt)
                 log_data = {
@@ -467,7 +497,7 @@ class Trainer:
                 }
                 if metrics['mfu'] is not None:   # omit rather than log a null series
                     log_data["train/mfu"] = metrics['mfu']
-                wandb_run.log(log_data)
+                metrics_run.log(log_data)
 
             # Evaluation
             last_step = (step == self.max_steps - 1)
@@ -480,9 +510,8 @@ class Trainer:
                 )
                 print0(f"Step {step:05d} | {eval_str}")
 
-                # Log to wandb
                 if self.master_process:
-                    wandb_run.log({
+                    metrics_run.log({
                         "step": step,
                         "total_training_flops": metrics['flops_so_far'],
                         "total_training_time": total_training_time,
@@ -519,7 +548,7 @@ class Trainer:
 
         # Training complete
         self._print_completion_info()
-        wandb_run.finish()
+        metrics_run.finish()
 
     def _apply_lr_schedule(self, step):
         """
@@ -732,9 +761,15 @@ class Trainer:
         self.system.train()
         return results
 
-    def _init_wandb(self):
+    def _init_metrics(self):
         """
-        Initialize wandb for this stage.
+        Create the metrics sink for this stage; called on rank 0 only, when
+        training starts (after the resume checks).
+
+        The default is wandb. The training loop needs only `.log(dict)` and
+        `.finish()` from the returned object, so a subclass can return anything
+        with those two methods (a local file writer, a wrapper around this
+        default, ...) without wandb being installed.
 
         Reads wandb config from:
           1. config['wandb'] (project, name, enabled)
@@ -743,9 +778,6 @@ class Trainer:
         Returns:
             wandb run or DummyWandb
         """
-        if not self.master_process:
-            return DummyWandb()
-
         # Get wandb config from config dict (with defaults)
         wandb_config = self.config.get('wandb', {})
         enabled = wandb_config.get('enabled', True)
@@ -754,7 +786,9 @@ class Trainer:
         if not enabled:
             print0("wandb disabled (config['wandb']['enabled'] = False)\n")
             return DummyWandb()
-        if wandb is None:
+        try:
+            import wandb
+        except ImportError:
             print0("wandb is not installed; using no-op logger\n")
             return DummyWandb()
 
@@ -772,12 +806,22 @@ class Trainer:
             'world_size': self.world_size,
             'gpu_type': self.gpu_type,
             **self.optimizer_config,
+            'effective_initial_lr': self._effective_initial_lr(),
         }
+        if self._resume_changes:
+            run_config['optimizer_hparams_adopted'] = [
+                f"optimizer[{i}].param_groups[{j}].{k}: {old!r} -> {new!r}"
+                for i, j, k, old, new in self._resume_changes]
 
-        wandb_run = wandb.init(project=wandb_project, name=wandb_name, config=run_config)
+        run = wandb.init(project=wandb_project, name=wandb_name, config=run_config)
         print0(f"wandb initialized: {wandb_project}/{wandb_name}\n")
 
-        return wandb_run
+        return run
+
+    def _effective_initial_lr(self):
+        """Read effective base LRs from the optimizer groups after resume handling."""
+        return {f"optimizer[{i}].param_groups[{j}]": g.get('initial_lr', g['lr'])
+                for i, opt in enumerate(self.optimizers) for j, g in enumerate(opt.param_groups)}
 
     def _print_training_info(self):
         """Print training configuration information."""
@@ -792,7 +836,8 @@ class Trainer:
         print0(f"  Grad accum steps: {self.grad_accum_steps}")
         print0(f"  Total batch size: {self.total_batch_size} tokens")
         print0(f"Learning rate schedule:")
-        print0(f"  lr_max: {self.optimizer_config['lr_max']}")
+        print0("  initial_lr (effective, per param group): " + ", ".join(
+            f"{name}={v:.6g}" for name, v in self._effective_initial_lr().items()))
         print0(f"  scheduler: {self.scheduler_config.get('type', 'linear')}")
         print0(f"  warmup_steps: {self.scheduler_config.get('warmup_steps', 0)}")
         if self.scheduler_config.get('type', 'linear') == 'linear':

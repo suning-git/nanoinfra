@@ -49,5 +49,5 @@ def test_old_name_wrapper_passes_gpt(monkeypatch):
     seen = {}
     monkeypatch.setattr(model_setup, "build_system",
                         lambda cls, cfg, **kw: seen.update(cls=cls, cfg=cfg) or "ok")
-    assert model_setup.setup_model_for_training(TINY, use_compile=False) == "ok"
+    assert model_setup.setup_model_for_training(TINY, head_ce="naive") == "ok"
     assert seen["cls"] is GPT and seen["cfg"] is TINY

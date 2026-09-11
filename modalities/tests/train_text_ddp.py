@@ -136,7 +136,7 @@ def main(cfg: DictConfig) -> None:
         config["model"].update(depth=20, dim=1280, n_head=10, n_kv_head=10)
         config["sequence_len"] = 1024
         config["device_batch_size"] = 2
-        config["use_compile"] = True
+        config["compile_trunk"] = True
 
     print0("=" * 80)
     print0("train_text_ddp — text pretraining through the PATCHED core (replicated DP)")
@@ -151,10 +151,10 @@ def main(cfg: DictConfig) -> None:
         n_layer=model_config["depth"], n_head=model_config["n_head"],
         n_kv_head=model_config["n_kv_head"], n_embd=model_config["dim"],
         n_token_types=layout.n_token_types)
-    setup = build_system(GPT, gpt_config, use_compile=False, head_ce="liger",
+    setup = build_system(GPT, gpt_config, head_ce="liger",
                          seed=config.get("seed", 42), parallel="ddp")
     system, rank, world = setup["system"], setup["rank"], setup["world_size"]
-    if config.get("use_compile", True):
+    if config.get("compile_trunk", True):
         compile_blocks(system.trunk)
 
     tokenizers = {"text": tokenizer, "layout": layout,
