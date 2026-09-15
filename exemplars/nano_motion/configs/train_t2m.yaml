@@ -46,8 +46,7 @@ recipe:
   t2m:
     template: [bos, text_start, text_tokens, text_end,
                motion_start, motion_tokens, motion_end, eos]
-    supervise: tags
-    supervise_tags: [motion_tokens, motion_end]
+    supervise: [motion_tokens, motion_end]
   motion:
     template: [bos, motion_start, motion_tokens, motion_end, eos]
     supervise: all

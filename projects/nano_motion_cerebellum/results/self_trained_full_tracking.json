@@ -1,0 +1,173 @@
+{
+  "across_training_seeds": {
+    "Eg_mpjpe": {
+      "mean": 149.11254040013486,
+      "sample_std": 3.7393507422623804
+    },
+    "Empjpe": {
+      "mean": 49.156646539941825,
+      "sample_std": 1.354661197802744
+    },
+    "completion": {
+      "mean": 0.9755165989159892,
+      "sample_std": 0.021204925413742647
+    },
+    "foot_slide": {
+      "mean": 6.954886852017715,
+      "sample_std": 0.6978376554805921
+    },
+    "jerk": {
+      "mean": 5.860701043461254,
+      "sample_std": 0.2750108920168141
+    },
+    "succ": {
+      "mean": 0.8333333333333334,
+      "sample_std": 0.2204792759220492
+    }
+  },
+  "per_seed": [
+    {
+      "aggregate": {
+        "Eg_mpjpe": 144.79873077171735,
+        "Empjpe": 50.049560150456124,
+        "completion": 1.0,
+        "foot_slide": 6.996754481718521,
+        "jerk": 5.902826725508273,
+        "succ": 1.0
+      },
+      "by_prompt": {
+        "nano_motion_self_forward": {
+          "Eg_mpjpe": 165.0485910352374,
+          "Empjpe": 52.36240916124226,
+          "completion": 1.0,
+          "foot_slide": 8.114138062611854,
+          "jerk": 6.570476549017268,
+          "succ": 1.0
+        },
+        "nano_motion_self_left": {
+          "Eg_mpjpe": 131.06599644197644,
+          "Empjpe": 40.77646066332396,
+          "completion": 1.0,
+          "foot_slide": 5.7627129938049695,
+          "jerk": 4.507770049139183,
+          "succ": 1.0
+        },
+        "nano_motion_self_right": {
+          "Eg_mpjpe": 138.2816048379382,
+          "Empjpe": 57.00981062680216,
+          "completion": 1.0,
+          "foot_slide": 7.113412388738739,
+          "jerk": 6.630233578368367,
+          "succ": 1.0
+        }
+      },
+      "episodes": 12,
+      "passes_demo_floor": true,
+      "passes_required_clips": true,
+      "training_seed": 0
+    },
+    {
+      "aggregate": {
+        "Eg_mpjpe": 151.43077977662773,
+        "Empjpe": 49.82245585569668,
+        "completion": 0.9630081300813008,
+        "foot_slide": 7.630848093538123,
+        "jerk": 6.112218577578616,
+        "succ": 0.5833333333333334
+      },
+      "by_prompt": {
+        "nano_motion_self_forward": {
+          "Eg_mpjpe": 161.42228122438024,
+          "Empjpe": 50.758239220213426,
+          "completion": 1.0,
+          "foot_slide": 8.573394136025499,
+          "jerk": 6.419519442236715,
+          "succ": 1.0
+        },
+        "nano_motion_self_left": {
+          "Eg_mpjpe": 147.6258391811859,
+          "Empjpe": 49.02890354025544,
+          "completion": 0.9182926829268293,
+          "foot_slide": 7.322094882117907,
+          "jerk": 5.441028672307885,
+          "succ": 0.25
+        },
+        "nano_motion_self_right": {
+          "Eg_mpjpe": 145.24421892431704,
+          "Empjpe": 49.68022480662118,
+          "completion": 0.9707317073170731,
+          "foot_slide": 6.997055262470963,
+          "jerk": 6.476107618191248,
+          "succ": 0.5
+        }
+      },
+      "episodes": 12,
+      "passes_demo_floor": false,
+      "passes_required_clips": false,
+      "training_seed": 1
+    },
+    {
+      "aggregate": {
+        "Eg_mpjpe": 151.10811065205954,
+        "Empjpe": 47.59792361367266,
+        "completion": 0.9635416666666666,
+        "foot_slide": 6.2370579807965,
+        "jerk": 5.567057827296871,
+        "succ": 0.9166666666666666
+      },
+      "by_prompt": {
+        "nano_motion_self_forward": {
+          "Eg_mpjpe": 172.53391282292722,
+          "Empjpe": 50.07512376921597,
+          "completion": 0.890625,
+          "foot_slide": 7.037434914667074,
+          "jerk": 6.031251725778535,
+          "succ": 0.75
+        },
+        "nano_motion_self_left": {
+          "Eg_mpjpe": 137.33445195942897,
+          "Empjpe": 39.71217321522301,
+          "completion": 1.0,
+          "foot_slide": 5.619040348680772,
+          "jerk": 4.569639954358195,
+          "succ": 1.0
+        },
+        "nano_motion_self_right": {
+          "Eg_mpjpe": 143.4559671738224,
+          "Empjpe": 53.00647385657901,
+          "completion": 1.0,
+          "foot_slide": 6.054698679041654,
+          "jerk": 6.100281801753882,
+          "succ": 1.0
+        }
+      },
+      "episodes": 12,
+      "passes_demo_floor": true,
+      "passes_required_clips": true,
+      "training_seed": 2
+    }
+  ],
+  "protocol": {
+    "completion_floor": 0.85,
+    "observation_noise": true,
+    "reference_clips": [
+      "nano_motion_self_forward",
+      "nano_motion_self_left",
+      "nano_motion_self_right"
+    ],
+    "repeats": 4,
+    "required_success_clips": [
+      "nano_motion_self_left",
+      "nano_motion_self_right"
+    ],
+    "success_floor": 0.6666666666666666,
+    "tracker_commit": "a3b8d0c092684f1307c53175d94260c4ff323306",
+    "training_seeds": [
+      0,
+      1,
+      2
+    ]
+  },
+  "result": "failed",
+  "schema": "nano-motion-cerebellum-tracking-review-v1"
+}

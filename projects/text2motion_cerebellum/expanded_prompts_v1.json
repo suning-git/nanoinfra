@@ -1,0 +1,86 @@
+{
+  "schema": "text2motion-expanded-prompts-preregistered-v1",
+  "generation_attempts_per_new_prompt": 1,
+  "selection_rule": "no rerolls; every preregistered prompt is reported",
+  "evaluation_repeats": 4,
+  "thresholds": {
+    "minimum_new_quality_pass_rate": 0.6666666666666666,
+    "minimum_per_seed_tracking_success": 0.75,
+    "minimum_per_seed_completion": 0.9,
+    "minimum_per_seed_end_to_end_success": 0.6
+  },
+  "prompts": [
+    {
+      "tag": "walk_forward",
+      "text": "walk forward",
+      "category": "locomotion",
+      "source": "frozen_existing"
+    },
+    {
+      "tag": "walk_turn_left",
+      "text": "walk forward and turn left",
+      "category": "turning",
+      "source": "frozen_existing"
+    },
+    {
+      "tag": "walk_turn_right",
+      "text": "walk forward and turn right",
+      "category": "turning",
+      "source": "frozen_existing"
+    },
+    {
+      "tag": "walk_backward",
+      "text": "walk backward",
+      "category": "locomotion",
+      "source": "new_generation"
+    },
+    {
+      "tag": "sidestep_left",
+      "text": "step sideways to the left",
+      "category": "locomotion",
+      "source": "new_generation"
+    },
+    {
+      "tag": "sidestep_right",
+      "text": "step sideways to the right",
+      "category": "locomotion",
+      "source": "new_generation"
+    },
+    {
+      "tag": "jog_forward",
+      "text": "jog forward",
+      "category": "dynamic_locomotion",
+      "source": "new_generation"
+    },
+    {
+      "tag": "squat",
+      "text": "squat down and stand up",
+      "category": "whole_body",
+      "source": "new_generation"
+    },
+    {
+      "tag": "bow",
+      "text": "bow forward and stand upright",
+      "category": "whole_body",
+      "source": "new_generation"
+    },
+    {
+      "tag": "wave_right_hand",
+      "text": "stand and wave the right hand",
+      "category": "upper_body_gesture",
+      "source": "new_generation"
+    },
+    {
+      "tag": "raise_both_arms",
+      "text": "raise both arms above the head and lower them",
+      "category": "upper_body_gesture",
+      "source": "new_generation"
+    },
+    {
+      "tag": "kick_right_leg",
+      "text": "kick forward with the right leg",
+      "category": "dynamic_balance",
+      "source": "new_generation"
+    }
+  ]
+}

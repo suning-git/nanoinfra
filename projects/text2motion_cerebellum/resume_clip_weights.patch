@@ -1,0 +1,23 @@
+diff --git a/motion_tracking/train.py b/motion_tracking/train.py
+--- a/motion_tracking/train.py
++++ b/motion_tracking/train.py
+@@ -261,6 +261,19 @@ def main():
+         start_it = int(meta.get("it", 0)) + 1
+         best_len = float(meta.get("best_len", 0.0))
+         resumed_w = meta.get("clip_weights")
++        if resumed_w is not None:
++            try:
++                resumed_n = len(resumed_w)
++            except TypeError:
++                resumed_n = -1
++            if resumed_n != len(refs):
++                print(
++                    f"resume: discarding {resumed_n}-clip adaptive-sampling "
++                    f"weights for the current {len(refs)}-clip corpus; "
++                    "restarting from uniform sampling",
++                    flush=True,
++                )
++                resumed_w = None
+         print(f"resumed from {args.resume}"
+               + (f" at it {start_it} (best ep_len {best_len:.1f})" if meta
+                  else " [old-format checkpoint: iteration/optimizer state not stored,"

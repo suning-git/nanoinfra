@@ -1,0 +1,33 @@
+{
+  "schema": "text2motion-long-horizon-seam-protocol-v1",
+  "classification": "post_hoc_generator_interface_followup",
+  "source_variant": "baseline_two_chunks",
+  "source_generation_seeds": [0, 1, 2],
+  "development_generation_seeds": [0, 1],
+  "holdout_generation_seeds": [2],
+  "selection_rule": "evaluate every frozen prompt/seed cell once; rank candidates on development seeds by quality-pass count, then correction RMS, then shorter horizon; report the selected candidate only if all preregistered development, holdout, overall, and preservation floors pass",
+  "rerolls": 0,
+  "prompt_specific_tuning": false,
+  "boundary_frame": 60,
+  "source_fps": 30.0,
+  "correction": {
+    "linear_channels": "root xyz and all 29 G1 joint angles",
+    "linear_boundary_condition": "position and first-difference residual at the second-chunk start decay to zero with a quintic Hermite envelope",
+    "root_orientation": "left-multiplicative start-pose quaternion residual decays to identity with the same position envelope",
+    "first_chunk_modified": false
+  },
+  "candidates": {
+    "c1_decay_15": {"decay_frames": 15},
+    "c1_decay_30": {"decay_frames": 30},
+    "c1_decay_45": {"decay_frames": 45}
+  },
+  "acceptance": {
+    "minimum_development_quality_passed": 12,
+    "development_total": 18,
+    "minimum_holdout_quality_passed": 6,
+    "holdout_total": 9,
+    "minimum_overall_quality_passed": 18,
+    "overall_total": 27,
+    "preserve_every_baseline_passing_cell": true
+  }
+}
