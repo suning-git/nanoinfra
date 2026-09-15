@@ -119,6 +119,7 @@ Step 1 has an alternative: record your own —
 ```bash
 python -m exemplars.nano_world_model.data.record.run --tag rec1 --seed 0 --minutes 30
 python -m exemplars.nano_world_model.data.encode --source recorded
+python -m exemplars.nano_world_model.build_cache --force   # the cache is rebuilt from the manifest; --force if step 3 already ran
 ```
 
 which gives ground-truth actions and unlimited data at the cost of

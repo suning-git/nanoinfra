@@ -20,7 +20,7 @@ like next", which is what makes it a world model rather than a video generator.
 
 Usage:
     python -m exemplars.nano_world_model.train_wm
-    python -m exemplars.nano_world_model.train_wm max_steps=200 compile_trunk=false
+    python -m exemplars.nano_world_model.train_wm max_steps=400 compile_trunk=false   # (max_steps must exceed warmup_steps=300)
     torchrun --nproc_per_node=2 --standalone \
         -m exemplars.nano_world_model.train_wm parallel=ddp
 

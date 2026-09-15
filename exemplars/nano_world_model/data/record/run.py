@@ -24,7 +24,7 @@ from exemplars.nano_world_model.data.record.policies import (
     FWD_FAMILY, BalancedChooser, PansPolicy, coverage_policy)
 from exemplars.nano_world_model.data.record.shards import ShardWriter
 from exemplars.nano_world_model.data.record.worlds import (
-    LAYERS, WORLD_ASLEEP, WORLD_BOTS, _self_id, extract, sample_spot)
+    LAYERS, WORLD_ASLEEP, WORLD_BOTS, _self_id, extract, sample_spot, warp_home, bot_positions)
 
 # --- episode runner ----------------------------------------------------------
 
@@ -46,10 +46,20 @@ def run_episode(writer, rng, recipe, ep, seed, layer_name, world, n_frames,
     if world != WORLD_BOTS:
         raise ValueError("this recorder ships bot worlds only — set "
                          "pans.world_bots_frac: 1.0 in the recipe")
+    # walkable mask (recipe-optional): home-warp targets here, the dwell wall-probe below
+    wmask = (WalkableMask(recipe["monsters"]["walkable_mask"])
+             if recipe.get("monsters", {}).get("walkable_mask") else None)
     spawns = []
     for _ in range(8):
         game.cmd("addbot")
     if game.step_vec(NOOP) is None:
+        game.close()
+        return 0
+    # v4.2: the bots world gets the same home warp as monster worlds. Without
+    # it the player stayed on the wad's start spot while the 8 bots spawned on
+    # top of him — the first ~40 recorded frames were bots at point-blank range
+    # (every pipe4 bots-world episode; CHANGELOG v4.2).
+    if not warp_home(game, rng, wmask, bot_positions(game, self_id)):
         game.close()
         return 0
 
@@ -64,8 +74,6 @@ def run_episode(writer, rng, recipe, ep, seed, layer_name, world, n_frames,
     # facing; a blocked cell within ~120 units means a dwell would stare into
     # a wall. Mask = union of previously-walked cells, so unseen-but-open
     # reads "wall" — conservative in the right direction for dwells.
-    wmask = (WalkableMask(recipe["monsters"]["walkable_mask"])
-             if recipe.get("monsters", {}).get("walkable_mask") else None)
 
     def wall_probe():
         """(near, far): solid geometry within 48 / within 120 units of the

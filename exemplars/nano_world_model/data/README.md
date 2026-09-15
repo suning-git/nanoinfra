@@ -148,3 +148,12 @@ walls are invisible from behind, so the frame stops being redrawn while the
 game keeps ticking (9.6% of the research corpus pipe4). Filter such corpora
 per episode with `MapBounds.inside` on the sidecar poses. `record/walkable.npz`
 was rebuilt from in-map poses only at the same time.
+
+**v4.2** (2026-09-14): bots worlds get the home warp too. Until v4.1 a bots-world
+episode began with the player still on the wad's start spot while the 8 bots
+spawned on top of him, so its first ~40 frames (median; up to 373) were bot bodies
+and spawn fog at point-blank range — every such episode in corpora recorded by v4/v4.1
+(0.78% of pipe4's frames), invisible to the out-of-map check because the start spot
+is inside the map. `worlds.warp_home` now runs for bots worlds before frame 0;
+the research twin's recorder test suite records a short bots episode with both recorders and
+checks that no early frame is on the start spot (that suite is not shipped here).

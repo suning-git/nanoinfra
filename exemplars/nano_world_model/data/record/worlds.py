@@ -18,6 +18,9 @@ runner drops any episode whose player is found outside (data/README.md,
 "Recorder version").
 """
 
+from exemplars.nano_world_model import spec
+from exemplars.nano_world_model.data.record.engine import NOOP
+
 MONSTERS = ("Zombieman", "ShotgunGuy", "DoomImp", "Demon", "Cacodemon", "HellKnight")
 MOVER_CLASSES = set(MONSTERS) | {"DoomPlayer"}
 TRANSIENT = {"TeleportFog", "Blood", "BulletPuff", "Rocket", "PlasmaBall"}
@@ -64,6 +67,58 @@ def sample_spot(game, rng, mask, placed=(), min_dist=0, keep=None, tries=40):
             continue
         return x, y
     return None
+
+
+def bot_positions(game, self_id):
+    """(x, y) of every other player (the bots) right now — the `placed` list a
+    bots-world home warp must keep away from."""
+    st = game.g.get_state()
+    return [(float(o.position_x), float(o.position_y))
+            for o in (st.objects or []) if o.name == "DoomPlayer" and o.id != self_id]
+
+
+def warp_home(game, rng, mask, placed, min_dist=160):
+    """Warp the player to a home spot before the stream starts: away from
+    everything in `placed`, INSIDE THE MAP, and mobile (a blind warp can wedge
+    the player into solid geometry — smoke2 spent a whole episode staring at a
+    wall). Probe: 6 FWD tics must move >= 10 units. The mobility probe alone is
+    ANTI-diagnostic for the void — nothing out there blocks you, so it always
+    passed — which is how 166 pipe4 episodes started outside the map. Hence
+    in_map on the landed pose, before and after the probe. No valid home in 6
+    rounds = no episode (it used to proceed with whatever the last warp gave).
+    Then 30 NOOP tics so whatever was placed settles before frame 0.
+
+    v4.2 (2026-09-14): monster worlds always did this inside seed_monsters;
+    BOTS WORLDS DID NOT — the player stayed on the wad's type-1 start while the
+    8 bots spawned on top of him, and the first ~40 recorded frames (median;
+    up to 373) were bot bodies / spawn sprites at point-blank range. 858/1732
+    pipe4 episodes (every bots-world episode) begin that way: 63,479 frames,
+    0.78% of the corpus, invisible to the out-of-map health check. Returns
+    True on success, False = do not record this episode."""
+    fwd = spec.ACTION_COMBOS[8]
+    for _ in range(6):
+        spot = sample_spot(game, rng, mask, placed, min_dist=min_dist)
+        if spot is None:
+            continue
+        x, y = spot
+        game.cmd(f"warp {x} {y}")
+        if game.step_vec(NOOP) is None:
+            return False
+        hx, hy, _ = game.pose()
+        if not game.in_map(hx, hy):
+            continue
+        for _ in range(6):
+            if game.step_vec(fwd) is None:
+                return False
+        mx, my, _ = game.pose()
+        if (mx - hx) ** 2 + (my - hy) ** 2 >= 10 ** 2 and game.in_map(mx, my):
+            break
+    else:
+        return False
+    for _ in range(30):
+        if game.step_vec(NOOP) is None:
+            return False
+    return True
 
 
 def extract(state, self_id):

@@ -30,6 +30,12 @@ outputs/*
 # above could no longer re-include the scaffold.
 exemplars/*/outputs/
 projects/*/outputs/
+# Same for per-exemplar checkpoints: the nano_world_model quickstart saves to
+# exemplars/nano_world_model/models/<run> (configs/train_wm.yaml). Found by
+# running the README in a fresh tree (2026-09-15): without this the first
+# training run leaves its checkpoints as untracked files in git status.
+exemplars/*/models/
+projects/*/models/
 
 # --- OS ---
 .DS_Store

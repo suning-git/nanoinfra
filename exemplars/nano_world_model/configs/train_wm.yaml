@@ -42,7 +42,13 @@ clip:
 # The default is the QUICKSTART batch. The real-run regime is 32 rows (>=32k
 # supervised tokens per update — measured knee, see README "The real run");
 # 4 rows exists so the five-command smoke fits any GPU and finishes in minutes.
-device_batch_size: 4
+# device_batch_size is 2, not 4, so the SAME 4-row update runs on one GPU
+# (grad_accum 2) and on two (grad_accum 1): "replicated" means the two-GPU
+# command trains exactly what the one-GPU command trains. With 4 per device the
+# two-GPU command asked for 8 rows per step out of a 4-row update and core's
+# divisibility check refused it (2026-09-15 acceptance; test_ddp.py bypasses
+# the config, so it never saw this).
+device_batch_size: 2
 total_batch_rows: 4
 
 # "ddp" replicates the model and syncs gradients with NanoDDP (measured best here:

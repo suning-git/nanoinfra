@@ -38,7 +38,9 @@ NOOP = np.zeros(6, np.uint8)
 # tic must be inside the map (see MapBounds / Game.in_map); auto-respawns are
 # recorded as `ep_respawn_tics`. Corpora from v4 and earlier can contain
 # episodes recorded entirely outside the map — filter them with MapBounds.
-RECORDER_VERSION = "v4.1"
+# v4.2 (2026-09-14): bots worlds get the home warp too — earlier corpora begin
+# every bots-world episode with ~40 frames of bots spawning on the player.
+RECORDER_VERSION = "v4.2"
 
 class MapBounds:
     """The playable area as the engine reports it: the ONE-SIDED wall lines,
