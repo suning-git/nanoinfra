@@ -8,8 +8,9 @@ Key/value caches for autoregressive decoding.
     StaticKVCache  every shape and every address fixed across steps, which is what
                    CUDA graphs require. Costs an attention mask; buys the replay of a
                    recorded launch sequence instead of re-launching every kernel. At
-                   batch-1 decode that is most of the time — measured 3.5x on a 12-layer
-                   768-dim model.
+                   batch-1 decode that is most of the time: a 12-layer 768-dim model
+                   measured 2.68 ms/token eager, 0.95 compiled, 0.51 compiled and
+                   graph-replayed (RTX 5090, torch 2.12).
 
 KVCache implements the contract core/model/gpt.py speaks (CausalSelfAttention.forward):
     get_pos()                  -> #tokens already cached (the trunk reads this ONCE
@@ -21,7 +22,14 @@ Within one trunk forward every layer inserts the same T positions in order
 0..n_layer-1, so the position advances exactly once per forward: on the LAST
 layer's insert. Buffers are allocated lazily from the first insert's dtype/device
 (so the cache follows autocast) .
+
+Both caches keep their own valid length — the caller never hands it in. What a forward
+may SEE is not cache state either: it is that forward's `causal` argument
+(GPT.forward), so one cache serves causal writes and bidirectional block-diffusion
+passes in alternation. Both rewind, between complete forwards.
 """
+
+import operator
 
 import torch
 
@@ -57,6 +65,20 @@ class KVCache:
         """Rewind to empty; buffers are kept and overwritten."""
         self.pos = 0
 
+    def rewind(self, n) -> None:
+        """Forget the last n cached positions; the next forward overwrites them.
+
+        Called between complete forwards — a block-diffusion denoise pass inserts the
+        noisy block and must forget it before the next pass. Nothing is zeroed. It undoes
+        HISTORY, not what the kept positions computed: positions that attended to the
+        forgotten ones bidirectionally still carry them in their K/V, so a caller that
+        rewinds into a bidirectional chunk must rewind the whole chunk.
+        """
+        n = _host_count(n, "KVCache")
+        if not 0 <= n <= self.pos:
+            raise ValueError(f"KVCache rewind {n} outside [0, pos={self.pos}]")
+        self.pos -= n
+
     def insert_kv(self, layer_idx, k, v):
         """k, v: [B, n_kv_head, T, head_dim] for this forward's T new positions.
         Returns the full cached (k, v) view up to pos+T."""
@@ -82,6 +104,21 @@ class KVCache:
         return full_k, full_v
 
 
+def _host_count(n, cache):
+    """rewind's n as a Python int. Not a float (pos would become one), not a bool (a flag
+    passed where a count belongs), not a tensor (reading it syncs the GPU, the cost the
+    static cache exists to avoid; the message names the type, never the value, for the
+    same reason). NumPy integers pass."""
+    if isinstance(n, (bool, torch.Tensor)):
+        raise TypeError(f"{cache} rewind takes a host int, got {type(n).__name__}")
+    return operator.index(n)
+
+
+def _bidir_is_gone(*_):
+    raise AttributeError("StaticKVCache.bidir was removed: pass causal=False (bidirectional "
+                         "chunk) or causal=True to the trunk forward instead")
+
+
 class StaticKVCache:
     """A cache with every shape and address pinned, so CUDA graphs can replay it.
 
@@ -103,21 +140,29 @@ class StaticKVCache:
     the first insert after a reset, and an address is exactly what a graph may not
     change.
 
-    `bidir` switches the mask from causal decode to "every query sees the whole prefix
-    plus the current chunk, bidirectionally", which is what a block-diffusion denoise
-    step needs. A plain attribute rather than a constructor argument because it changes
-    between steps of the same sequence, on the same cache.
+    The mask is causal, or "every query sees the whole prefix plus the current chunk,
+    bidirectionally" for a block-diffusion denoise step, as the forward's `causal`
+    argument says. Under CUDA graphs each value is its own recorded graph.
     """
+
+    # Visibility used to be selected by setting this attribute. Code written for that
+    # would otherwise set a plain attribute nothing reads and run every forward causal,
+    # silently; refusing the name makes it fail where it is written.
+    bidir = property(_bidir_is_gone, _bidir_is_gone)
 
     def __init__(self, n_layer, batch_size, n_kv_head, head_dim, max_len,
                  device="cuda", dtype=torch.bfloat16):
-        shape = (n_layer, batch_size, n_kv_head, max_len, head_dim)
-        self.k = torch.zeros(shape, dtype=dtype, device=device)
-        self.v = torch.zeros(shape, dtype=dtype, device=device)
+        # One buffer per layer, not one [n_layer, ...] tensor. Compiled, a layer's write
+        # into its slice of one big tensor became a select_scatter over the whole tensor,
+        # every layer, every forward; separate buffers keep each write the size of the
+        # write. 12 layers x 768, RTX 5090: a compiled 256-token forward over 8704 slots
+        # 8.60 -> 2.95 ms, a graph-replayed decode step over 1536 slots 0.91 -> 0.51 ms.
+        shape = (batch_size, n_kv_head, max_len, head_dim)
+        self.k = [torch.zeros(shape, dtype=dtype, device=device) for _ in range(n_layer)]
+        self.v = [torch.zeros(shape, dtype=dtype, device=device) for _ in range(n_layer)]
         self.pos = torch.zeros((), dtype=torch.long, device=device)   # on the GPU   (1)
         self.arange = torch.arange(max_len, device=device)
         self.n_layer, self.max_len = n_layer, max_len
-        self.bidir = False
 
     @classmethod
     def for_model(cls, config, batch_size, max_len, **kw):
@@ -134,8 +179,12 @@ class StaticKVCache:
 
         A block-diffusion denoise loop inserts the noisy block's keys and values on
         every step and must forget them before the next one, and before the final clean
-        insert — otherwise the block attends to its own earlier guesses.
+        insert — otherwise the block attends to its own earlier guesses. As with
+        KVCache.rewind, a bidirectional chunk is forgotten whole or not at all.
         """
+        n = _host_count(n, "StaticKVCache")     # a host int: checking the sign costs no sync
+        if n < 0:
+            raise ValueError(f"StaticKVCache rewind {n}: a negative rewind would advance pos")
         self.pos.sub_(n)
         # Same justification as insert_kv's overflow assert: unchecked, a rewind past
         # zero surfaces later as an anonymous device-side index assert that poisons
@@ -163,14 +212,14 @@ class StaticKVCache:
         positions = self.pos + torch.arange(T, device=cos.device)
         return cos.index_select(1, positions), sin.index_select(1, positions)
 
-    def attn_mask(self, T, device):
+    def attn_mask(self, T, device, causal):
         """[1, 1, T, max_len] bool — shape fixed, contents follow `pos`.         (2)
 
         Built ONCE per trunk forward, by GPT.forward before the block loop, and handed
         to every block. Not once per layer: `pos` advances on the last layer's insert,
         so a mask built inside the attention would be right for every layer but the last.
         """
-        if self.bidir:
+        if not causal:
             # Denoise chunk: every query attends to slots < pos + T, i.e. the clean
             # prefix plus the whole current block, bidirectionally.
             return (self.arange[None, :] < (self.pos + T))[None, None]

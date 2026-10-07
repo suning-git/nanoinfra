@@ -123,7 +123,7 @@ def test_a_wrong_mask_is_caught():
     model = _model(4)
     idx = _tokens(40)
     bad = StaticKVCache.for_model(model.config, 1, CFG["sequence_len"])
-    bad.attn_mask = lambda T, device: (
+    bad.attn_mask = lambda T, device, causal: (
         bad.arange[None, :] <= (bad.pos + torch.arange(T, device=device))[:, None] + 1
     )[None, None]
 
@@ -189,17 +189,21 @@ def test_shapes_and_addresses_are_fixed():
         "position must live on the device — a Python int is baked into the graph"
 
     model(_tokens(8), kv_cache=STATIC)
-    k0, shape0 = st.k.data_ptr(), st.k.shape
+    layout = lambda: [(t.data_ptr(), t.shape, t.stride(), t.dtype, t.device) for t in st.k + st.v]
+    before = layout()
+    # Storage, not address: views of one big tensor have different addresses, and they
+    # would hand a compiled graph aliased inputs again.
+    assert len({t.untyped_storage().data_ptr() for t in st.k + st.v}) == 2 * CFG["n_layer"], \
+        "two layers share a buffer"
     for _ in range(4):
         model(_tokens(1), kv_cache=STATIC)
-        assert st.k.shape == shape0, "buffer shape changed"
-        assert st.k.data_ptr() == k0, "buffer was reallocated"
+        assert layout() == before, "a buffer was reallocated or reshaped"
     assert int(st.pos) == 12
 
     st.rewind(4)
     assert int(st.pos) == 8
     st.reset()
-    assert int(st.pos) == 0 and st.k.data_ptr() == k0, "reset must not reallocate"
+    assert int(st.pos) == 0 and layout() == before, "reset must not reallocate"
 
 
 @torch.no_grad()
@@ -210,12 +214,73 @@ def test_bidirectional_mask_sees_the_whole_chunk():
     st = _static(model)
     model(_tokens(10), kv_cache=STATIC)
 
-    st.bidir = True
-    mask = st.attn_mask(6, "cuda")
-    assert mask.shape == (1, 1, 1, CFG["sequence_len"]), "bidir mask is one row"
+    mask = st.attn_mask(6, "cuda", causal=False)
+    assert mask.shape == (1, 1, 1, CFG["sequence_len"]), "bidirectional mask is one row"
     assert int(mask.sum()) == 16, "every query sees prefix (10) + the whole chunk (6)"
 
-    st.bidir = False
-    causal = st.attn_mask(6, "cuda")
+    causal = st.attn_mask(6, "cuda", causal=True)
     assert causal.shape == (1, 1, 6, CFG["sequence_len"])
     assert [int(r.sum()) for r in causal[0, 0]] == [11, 12, 13, 14, 15, 16]
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("n_kv_head", [4, 2])          # plain attention, then GQA
+def test_bidirectional_chunk_matches_across_caches(n_kv_head):
+    """A block-diffusion denoise pass (causal=False after a cached prefix) on both
+    caches: the dynamic one hands sdpa exactly the valid keys with no mask, the static
+    one masks its whole buffer by hand. Same visibility, different kernels — so the
+    contract is the one above, relative error plus argmax, and the control below shows
+    it can tell bidirectional from causal."""
+    model = _model(n_kv_head)
+    # A chunk long against its prefix, as in block diffusion: with prefix 8 / chunk 24 the
+    # correct path scores <= 1e-2 and a causal pass 0.13-0.22 (measured, three seeds,
+    # both head layouts); at prefix 30 / chunk 12 a causal pass scored only 0.06-0.08.
+    prefix, chunk = _tokens(8), _tokens(24, seed=2)
+
+    dyn = KVCache.for_model(model.config, 1, CFG["sequence_len"])
+    model(prefix, kv_cache=dyn)
+    d = model(chunk, kv_cache=dyn, causal=False)
+    _static(model)
+    model(prefix, kv_cache=STATIC)
+    s = model(chunk, kv_cache=STATIC, causal=False)
+    assert _rel(d, s) < 5e-2, f"relative error {_rel(d, s):.2e}"
+    assert_argmax_agrees(d, s)
+
+    dyn.rewind(24)
+    assert _rel(model(chunk, kv_cache=dyn, causal=True), s) > 1e-1, \
+        "a causal pass passed for a bidirectional one — the tolerance cannot tell them apart"
+
+
+@torch.no_grad()
+def test_static_refusals_leave_the_cache_alone():
+    """Every refused request raises before anything moves: position and buffer bytes are
+    checked after each one. Raised errors, not asserts, so `python -O` keeps them."""
+    model = _model(4)
+    st = _static(model)
+    model(_tokens(8), kv_cache=STATIC)
+    before = [t.clone() for t in st.k + st.v]
+
+    def untouched(what):
+        assert int(st.pos) == 8, f"{what} moved pos"
+        assert all(torch.equal(a.view(torch.uint8), b.view(torch.uint8))
+                   for a, b in zip(before, st.k + st.v)), f"{what} wrote the buffers"
+
+    refusals = (
+        (lambda: model(_tokens(4), kv_cache=STATIC, block_mask=object()), ValueError, "block_mask"),
+        (lambda: model(_tokens(4), kv_cache=STATIC, causal=1), TypeError, "causal must be"),
+        (lambda: st.rewind(-1), ValueError, "negative"),   # would advance pos past what was written
+        (lambda: st.rewind(2.0), TypeError, "integer"),    # would leave pos a float
+        (lambda: st.rewind(True), TypeError, "host int"),  # a flag where a count belongs
+        (lambda: st.rewind(torch.tensor(1, device="cuda")), TypeError, "host int"),   # would sync
+    )
+    for call, error, msg in refusals:
+        with pytest.raises(error, match=msg):
+            call()
+        untouched(call)
+    for touch in (lambda: st.bidir, lambda: setattr(st, "bidir", True)):
+        with pytest.raises(AttributeError, match="causal="):
+            touch()                              # the removed switch fails, not ignored
+    model.attach_kv_cache(None)
+    with pytest.raises(RuntimeError, match="attach"):
+        model(_tokens(4), kv_cache=STATIC)
+    untouched("STATIC with no cache attached")

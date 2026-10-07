@@ -65,6 +65,11 @@ than the one their numbers came from. See
 [`head_ce`](core/training/model_setup.py) for what the three arms are and what each
 costs.
 
+Plots and motion renders need `matplotlib`, which neither install above pulls in: the
+scaling figures, `projects/example_gpt2_vs_modern/plot.py`, and the motion GIFs drawn by
+`exemplars/nano_motion/generate.py` and by `projects/nano_multimodal`'s web panels.
+Training never imports it. Add it when you want those: `uv pip install matplotlib`.
+
 Requires Python ≥ 3.12 and a CUDA GPU for training. `compile_trunk` is on by
 default and torch.compile's inductor backend compiles C++17, so a **gcc ≥ 9**
 toolchain has to be on PATH (set `CC`/`CXX` if the system compiler is older —

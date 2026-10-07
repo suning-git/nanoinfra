@@ -142,6 +142,15 @@ def detect_gpu_type() -> tuple[str, float | None]:
         # MFU computed against this is approximate. Affects the MFU metric only, not
         # training math.
         'RTX 5090': 209.5e12,
+        # Ampere and Ada (FP16/BF16 tensor peak, dense):
+        'RTX A6000': 155e12,
+        'A800': 312e12,          # A800-SXM4-80GB, A100 compute
+        'RTX 4090': 165.2e12,    # consumer card, FP32-accumulate rate, as for the RTX 5090
+        'RTX 4060 TI': 44e12,    # consumer card, FP32-accumulate rate
+        # Turing has no bf16 tensor cores: these are its FP16 peaks, so MFU of a bf16 run on them is
+        # computed against a rate the card cannot reach in bf16 (it reads low).
+        'RTX 8000': 130e12,      # Quadro RTX 8000
+        'RTX 2080 TI': 108e12,
     }
 
     # Match on a DIGIT BOUNDARY, not a bare substring. 'H20' is a substring of

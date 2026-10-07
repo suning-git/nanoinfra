@@ -1,6 +1,6 @@
 [project]
 name = "nanoinfra"
-version = "0.1.0"
+version = "0.2.0"
 description = "Modality-agnostic training infrastructure for decoder-only transformers"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -34,11 +34,14 @@ dependencies = [
 where = ["."]
 include = ["core*", "modalities*"]
 
-# Hydra config yamls must ship in the wheel: library users compose
-# `pkg://core.configs` / `modalities/text/configs` without the source tree.
+# Non-Python runtime files must ship in the wheel: Hydra composes the yamls from the
+# installed package (`pkg://core.configs` / `modalities/text/configs`, no source tree
+# needed), and each motion tokenizer's recipe() reads the recipe.yaml next to it.
 [tool.setuptools.package-data]
 "core.configs" = ["*.yaml"]
 "modalities.text" = ["configs/*.yaml"]
+"modalities.motion.tokenizers.rot139_kin_fsq2" = ["recipe.yaml"]
+"modalities.motion.tokenizers.rot139_vqvae" = ["recipe.yaml"]
 
 [build-system]
 requires = ["setuptools>=68"]

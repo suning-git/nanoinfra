@@ -144,8 +144,8 @@ class CausalSelfAttention(nn.Module):
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
 
-    def forward(self, x, cos_sin, kv_cache, block_mask=None, attn_mask=None):
-        # Five attention regimes, dispatched below by mask argument and shape.
+    def forward(self, x, cos_sin, kv_cache, block_mask=None, attn_mask=None, causal=True):
+        # Six attention regimes, dispatched below by mask argument, `causal` and shape.
         # Each is bound to the fastest kernel that supports its constraint; the branch
         # order is precedence, and exactly one runs:
         #
@@ -162,16 +162,19 @@ class CausalSelfAttention(nn.Module):
         #   block_mask set     structured training masks (block-causal, prefix-LM) | flex
         #                      the mask is huge but BLOCK-sparse; flex never
         #                      materializes it and skips dead tiles — its home turf.
+        #   causal=False       bidirectional chunk (block-diffusion denoise) | sdpa,
+        #                      maskless: every query sees every valid key, the whole
+        #                      cached prefix plus this chunk, and the dynamic cache
+        #                      hands back exactly those.
         #   no cache / Tq==Tk  dense causal (training, full-prefix pass) | sdpa
         #                      is_causal=True rides FlashAttention, the fastest dense
         #                      path.
         #   dynamic, Tq==1     single-token cached decode | sdpa, maskless
         #                      K/V arrive sliced to the valid length and every cached
         #                      position is the past, so no mask is needed at all.
-        #   dynamic, 1<Tq<Tk   chunked continuation (append a prompt segment) | sdpa
-        #                      with a bool prefix+tril mask — the slow-kernel penalty
-        #                      the first row avoids per token is paid here ONCE per
-        #                      chunk, where it is noise.
+        #   dynamic, 1<Tq<Tk   chunked continuation (a prompt segment, a block-diffusion
+        #                      finalize) | sdpa: causal_lower_right in eager, the bool
+        #                      prefix+tril mask when compiling or when q/k/v dtypes mix.
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
@@ -221,6 +224,13 @@ class CausalSelfAttention(nn.Module):
             # 2026-07-30 on torch 2.12 across three H/KV/T/D shapes).
             y = flex_attention(q, k, v, block_mask=block_mask,
                                enable_gqa=self.enable_gqa)
+        elif not causal:
+            # Bidirectional chunk: checked BEFORE the Tq == Tk branch, which would make
+            # a chunk with no cache, or on an empty one, causal.
+            if self.enable_gqa:
+                y = F.scaled_dot_product_attention(q, k, v, is_causal=False, enable_gqa=True)
+            else:
+                y = F.scaled_dot_product_attention(q, k, v, is_causal=False)
         elif kv_cache is None or Tq == Tk:
             # During training (no KV cache), attend as usual with causal attention
             # And even if there is KV cache, we can still use this simple version when Tq == Tk
@@ -236,17 +246,28 @@ class CausalSelfAttention(nn.Module):
             else:
                 y = F.scaled_dot_product_attention(q, k, v, is_causal=False)
         else:
-            # During inference AND we have a chunk of queries in this forward pass:
-            # First, each query attends to all the cached keys/values (i.e. full prefix)
-            attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device) # True = keep, False = mask
-            prefix_len = Tk - Tq
-            attn_mask[:, :prefix_len] = True
-            # Then, causal attention within this chunk
-            attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
-            if self.enable_gqa:
-                y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=True)
+            # A chunk appended to a non-empty dynamic cache: query i sees keys
+            # j <= Tk - Tq + i. causal_lower_right says that to sdpa without a mask
+            # tensor and keeps its fast kernels: a bool mask measured 2.3-9.7x slower at
+            # 256 queries over 518-8578 keys (RTX 5090, torch 2.12, bf16). Two callers
+            # keep the bool mask. Compiled ones: dynamo cannot build that bias inside a
+            # compiled region (Unsupported, torch 2.12); keep this exact construction
+            # too, as the same mask built with arange changed the compiled output. And
+            # mixed dtypes: CUDA autocast runs the QK-norm in fp32 and leaves v bf16,
+            # which causal_lower_right refuses and sdpa's autocast casts.
+            if torch.compiler.is_compiling() or not (q.dtype == k.dtype == v.dtype):
+                mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device)  # True = keep
+                mask[:, :Tk - Tq] = True                                         # the prefix
+                mask[:, Tk - Tq:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
             else:
-                y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+                # Imported here: the module pulls in torch._dynamo, 0.45 s added to
+                # every `import core.model.gpt`; after the first call it is a dict lookup.
+                from torch.nn.attention.bias import causal_lower_right
+                mask = causal_lower_right(Tq, Tk)
+            if self.enable_gqa:
+                y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=True)
+            else:
+                y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
         # Re-assemble the heads side by side and project back to residual stream
         y = y.transpose(1, 2).contiguous().view(B, T, -1)
@@ -273,8 +294,8 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, cos_sin, kv_cache, block_mask=None, attn_mask=None):
-        x = x + self.attn(norm(x), cos_sin, kv_cache, block_mask, attn_mask)
+    def forward(self, x, cos_sin, kv_cache, block_mask=None, attn_mask=None, causal=True):
+        x = x + self.attn(norm(x), cos_sin, kv_cache, block_mask, attn_mask, causal)
         x = x + self.mlp(norm(x))
         return x
 
@@ -408,7 +429,7 @@ class GPT(nn.Module):
             block.attn._static_cache = cache
         return self
 
-    def forward(self, idx, token_types=None, kv_cache=None, block_mask=None):
+    def forward(self, idx, token_types=None, kv_cache=None, block_mask=None, *, causal=None):
         """
         Transformer body only (the "trunk") — returns hidden_states [B, T, H].
 
@@ -420,7 +441,32 @@ class GPT(nn.Module):
             token_types: [B, T] token type ids (optional)
             kv_cache: KV cache for inference
             block_mask: FlexAttention mask (optional)
+            causal: a shortcut for standard next-token-prediction (autoregressive)
+                attention, so that this case needs no block_mask. With P positions
+                already cached and these T new ones, query i sees key j iff
+                    True   j <= P + i   (causal, offset by the cached prefix)
+                    False  j <  P + T   (the whole prefix plus this chunk,
+                                         bidirectionally: a block-diffusion denoise pass)
+                None (default) means causal, or block_mask's pattern if one is given.
+                The prefix is never recomputed, and never sees the chunk. Under
+                torch.compile None and True are different graphs: on a compiled hot
+                path, pass one of them consistently.
+                Interim: the mask arguments (causal, attn_mask, block_mask) overlap;
+                this is a stopgap, and their roles will be reorganized.
         """
+        # Checked before any layer writes the cache, so a refused call leaves it as it was.
+        # Raised, not asserted: `python -O` strips asserts, and these guard a contract.
+        if causal is not None and type(causal) is not bool:
+            raise TypeError(f"causal must be None, True or False, got {type(causal).__name__}")
+        if causal is not None and block_mask is not None:
+            raise ValueError("pass causal or block_mask, not both")
+        if kv_cache is STATIC:
+            if block_mask is not None:
+                raise ValueError("the static cache does not take a block_mask")
+            if getattr(self, "_static_cache", None) is None:
+                raise RuntimeError("kv_cache=STATIC needs a cache attached first: attach_kv_cache(cache)")
+        causal = causal is not False
+
         B, T = idx.size()
         device = idx.device
 
@@ -442,14 +488,14 @@ class GPT(nn.Module):
             # layer but the last.
             cache = self._static_cache
             cos_sin = cache.rotary(self.cos, self.sin, T)
-            attn_mask = cache.attn_mask(T, device)
+            attn_mask = cache.attn_mask(T, device, causal)
         else:
             T0 = 0 if kv_cache is None else kv_cache.get_pos()
             cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T]
 
         x = norm(x)
         for block in self.transformer.h:
-            x = block(x, cos_sin, kv_cache, block_mask, attn_mask)
+            x = block(x, cos_sin, kv_cache, block_mask, attn_mask, causal)
         x = norm(x)
         return x
 
