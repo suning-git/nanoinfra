@@ -1,0 +1,20 @@
+diff --git a/motion_tracking/evaluate.py b/motion_tracking/evaluate.py
+--- a/motion_tracking/evaluate.py
++++ b/motion_tracking/evaluate.py
+@@ -101,6 +101,9 @@ def main():
+     ap.add_argument("--split", default="test", choices=["train", "test", "all"],
+                     help="which AMASS split to evaluate on (default: held-out test)")
+     add_ref_dir(ap)
++    ap.add_argument("--min-ref-frames", type=int, default=100,
++                    help="minimum reference length accepted by the loader; "
++                         "default preserves the training/evaluation convention")
+     ap.add_argument("--json", default=None,
+                     help="append the summary row to this json file (for the gallery)")
+     ap.add_argument("--episodes-json", default=None,
+@@ -160,5 +163,6 @@ def main():
+     # the deterministic TEST split — never seen in training
+     pool = load_amass_refs(n=args.amass, seed=12345, split=args.split,
++                           min_frames=args.min_ref_frames,
+                            ref_dir=args.ref_dir, robot=robot)
+     ref_sets = [[r] for r in pool]
+     names = [r["clip"] for r in pool]
