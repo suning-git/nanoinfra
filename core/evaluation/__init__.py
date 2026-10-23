@@ -2,19 +2,18 @@
 evaluator, e.g. the text modality's TextEvaluator, is injected via the
 Trainer's evaluators list)."""
 
-from .loss_eval import evaluate_loss
-from .eval_loss import evaluate_loss_logits, evaluate_loss_fused
+from .eval_loss import evaluate_loss
 from .evaluator import (
     Evaluator,
     LossEvaluator,
-    SourceLossEvaluator,
 )
+from .metrics import bits_per_byte, mean_ce, type_ce
 
 __all__ = [
     "evaluate_loss",
-    "evaluate_loss_logits",
-    "evaluate_loss_fused",
     "Evaluator",
     "LossEvaluator",
-    "SourceLossEvaluator",
+    "mean_ce",
+    "type_ce",
+    "bits_per_byte",
 ]

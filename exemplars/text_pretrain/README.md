@@ -1,7 +1,7 @@
 # exemplar: text_pretrain
 
 A **complete, minimal text-LM project** — the reference you fork to start your own.
-It trains a 135M-param model to val CE 3.81, measures its scaling law, and runs it
+It trains a 135M-param model to val CE 3.41, measures its scaling law, and runs it
 as a language model: the whole lifecycle in one small folder.
 
 This is the `exemplars/` tier — distinct from `projects/` (research, throwaway) and
@@ -37,14 +37,14 @@ python -m exemplars.text_pretrain.data.download_shards   # FineWeb shards -> out
 python -m modalities.text.train_tokenizer                # tokenizer artifact (seconds) -> outputs/tokenizer/
 ```
 
-Plus the `liger` extra — a real prerequisite here rather than a nice-to-have, so
-install with the `'.[liger]'` form of whichever install line the root README gave you.
-`spec.py` pins `head_ce=liger`, and a missing package now fails loudly instead of
-quietly training a different arm. Which arm you take changes the numbers in
-[`RESULTS.md`](RESULTS.md) — see "The head's three arms" there.
+Nothing more is needed: `spec.py` and `scaling.py` both pin `head_ce=compiled`, which needs no optional
+package. (`scaling.py` pinned `liger` until 2026-10-22, and the scaling curves this exemplar ships were measured
+with it.) Which arm you take changes the numbers in [`RESULTS.md`](RESULTS.md) a little — see "The head's three
+arms" there.
 
 ```bash
-# 1 · train the champion  (~4.4 h on one 5090; the checkpoint may already exist)
+# 1 · train the champion  (about 3.8 h on one 5090; 45 min on 8 A100s with --nproc 8 --parallel ddp,
+#     which saves under the _ddp path — then run stage 3 with --parallel ddp too)
 CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m exemplars.text_pretrain.pretrain
 
 # 2 · the compute-optimal scaling law — split the depths across both GPUs, then fit:
@@ -55,6 +55,11 @@ CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m exemplars.text_pretrain.scaling run -
 # 3 · sample from the champion
 CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m exemplars.text_pretrain.inference
 ```
+
+Both training stages store the parameters, gradients and AdamW moments in fp32 by default: `pretrain` follows
+core's `param_dtype` (fp32 since 2026-10), and `scaling run` / `scaling fit` default to `--param-dtype fp32`, the
+storage the shipped curves were measured in. For bf16 storage pass `param_dtype=bf16` to `pretrain` and
+`--param-dtype bf16` to both scaling commands.
 
 ## Multi-GPU: ddp vs fsdp, measured
 
@@ -115,8 +120,8 @@ cost of only 4.4 ms of extra backward — 83% hidden; the un-hideable tail (bloc
 
 Pinned capability numbers live in [`RESULTS.md`](RESULTS.md); [`provenance.md`](provenance.md)
 records how the recipe's `lr_max` was chosen. In short: a d12 / 135M model at
-**val CE 3.81**, a compute-optimal **frontier** over per-model training curves recovering the
-exponent **a ≈ 0.52** (Chinchilla ~0.5; see RESULTS §2), and coherent English continuations.
+**val CE 3.41**, a compute-optimal **frontier** over per-model training curves recovering the
+exponent **a ≈ 0.50** (Chinchilla ~0.5; see RESULTS §2), and coherent English continuations.
 
 ## Layout
 
@@ -127,14 +132,17 @@ scaling.py       stage 2 · compute-optimal scaling law (per-model curves + fron
 scaling_fit.py   the frontier fitter: lower envelope + N_opt ∝ C^a slope (used by scaling.py)
 inference.py     stage 3 · sample the champion (loads via core load_system —
                  the checkpoint self-describes its architecture)
-provenance.md    how lr_max=3e-4 was chosen (the LR bracket) + how to re-tune
+provenance.md    how lr_max was chosen (2026-10, and the July bracket) + how to re-tune
 inference_compare.md  the budget ladder: one spec, four budgets, samples side by side
 data/            download_shards.py — fetch the FineWeb shards
 example_results/ THE RUN THIS EXEMPLAR SHIPS — scaling.json · scaling_law.png ·
-                 samples.md · bracket.json. Committed; nothing here writes to it.
+                 samples.md, plus bracket.json (the July LR bracket, kept as history).
+                 Committed; nothing here writes to it.
 outputs/         YOUR run lands here (gitignored). `scaling.py fit` prints the
                  difference against example_results/ so you can see both.
 RESULTS.md       the pinned capability log
+tests/           test_scaling_head_ce.py (CPU, pytest) — scaling.py keeps the curves
+                 of different head_ce apart when it resumes and when it fits
 ```
 
 ## Data

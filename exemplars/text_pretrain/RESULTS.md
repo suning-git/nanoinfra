@@ -2,31 +2,56 @@
 
 What this project produces, through the blessed Orchestrator
 `modalities.text.train_text`. Three stages: (1) the champion, (2) the scaling
-law, (3) inference. How the recipe's `lr_max=3e-4` was chosen is
+law, (3) inference. How the recipe's `lr_max` was chosen is
 [`provenance.md`](provenance.md).
 
-**Fixed facts:** dim = depth×64, vocab 32768, seed 42, compile_trunk=true (the key was named `use_compile` when these ran),
-`head_ce=liger`, Chinchilla `target_param_data_ratio=20`. GPU: RTX 5090 (32 GB,
-500 W-capped). FineWeb sample-10BT.
+**Fixed facts:** dim = depth×64, vocab 32768, seed 42, compile_trunk=true (the key was named `use_compile` in
+July), Chinchilla `target_param_data_ratio=20`, FineWeb sample-10BT. The head arm, the storage and the GPU differ
+between sections and are stated in each.
+
+> **Storage precision.** §1's champion and §2's curves and exponent were measured with the parameters, their
+> gradients and the AdamW moments stored in fp32, core's default since 2026-10 (`param_dtype: fp32`; the arithmetic
+> stays under bf16 autocast). §2's measurement notes, §3's budget ladder and §4's throughput tables are earlier
+> measurements (July–August 2026) in bf16 storage, core's only option then, kept as measured. In bf16 storage an
+> update smaller than half a bf16 step of the weight is rounded away, so compare against those only in bf16 storage
+> (`param_dtype=bf16`).
 
 > **`head_ce` is part of the recipe, not the environment.** It used to be neither
 > stated nor pinned — the head took liger whenever the package happened to be
-> installed. That is why the MFU below is the one number here nobody can source: the
-> package was uninstalled 2026-07-05, the champion trained 07-09, and it was
-> reinstalled 07-10, with no record either way. Every number on this page is now
-> stamped with the arm that produced it, and `spec.py` pins it.
+> installed, and the July champion's arm went unrecorded (the package was uninstalled
+> 2026-07-05, the champion trained 07-09, and it was reinstalled 07-10). Every number
+> on this page is now stamped with the arm that produced it. `spec.py` and `scaling.py`
+> both pin `compiled`; `scaling.py` pinned `liger` until 2026-10-22, and §2's curves
+> were measured with it.
 
 ## 1 · The champion (best recipe, trained once)
 
-**d12 · dim 768 · 135,268,608 params · Chinchilla 2.705B tokens · 20,640 steps ·
-lr 3e-4 · ~59 % MFU (⚠ arm unrecorded — see note above) · final val CE 3.8101** — the shipped checkpoint
-(step_020000, ≈97 % through warmdown) re-measures **1.236 bits/byte**
-(CE 3.8165) on the standard 2 M val window. (An earlier "bpb 5.497" figure
-was bits-per-token: `token_bytes.pt` was missing and the byte table silently
-fell back to ones — since installed.) Checkpoint:
-`models/exemplars/text_pretrain_d12_lr3e-4/step_020000`. This is the model
-`inference.py` samples from; the scaling law (§2) characterises the same
-architecture family (dim = depth×64) at smaller sizes.
+**d12 · dim 768 · 135,268,608 params · Chinchilla 2.705B tokens · 20,640 steps · lr 6e-4 · `head_ce=compiled` ·
+fp32 storage · final val CE 3.4068, 1.1112 bits/byte** — the last step's checkpoint read on the standard 2 M val
+window on one GPU. Trained 2026-10-13 on 8 × A100 80 GB with `pretrain.py --nproc 8 --parallel ddp`, 44.6 min of
+training. Checkpoint: `models/exemplars/text_pretrain_d12_lr6e-4/step_020639` (a `--parallel ddp` run saves under
+`…_lr6e-4_ddp/` instead, which `inference.py --parallel ddp` reads), the model `inference.py` samples from; the scaling law (§2) characterises the same architecture family (dim = depth×64) at smaller sizes. How
+`lr_max` was chosen: [`provenance.md`](provenance.md).
+
+- **Read the window on one GPU.** The run's own last evaluation printed 3.4162. With 8 processes, each reads its
+  own row groups of the validation shard for an eighth of the 2 M tokens, so the window is a different set of
+  documents from the one a single process reads; the same checkpoint read on one GPU gives 3.4068. Validation CE
+  taken with different numbers of processes is not directly comparable.
+- **The same recipe elsewhere** (each read on one GPU, one run each): one RTX 5090, 3.4120 (3.8 h, about 70 % MFU);
+  one A100, 3.4026. Both ran the code of early 2026-10, whose rows held 511 positions, with the whole trunk compiled
+  on one process; the 8-A100 run is the current code (rows of 512, blocks compiled one by one under ddp). They also
+  differ in the batch sequence (8 ranks read different documents at each step) and the GPU type, and single runs
+  cannot separate these; all three agree within 0.01.
+- **Throughput.** 8 A100s took 44.6 min against 230 min for one A100 (the early-2026-10 code): 5.2×, about 0.64 of
+  linear. The step times fall into bands that interleave through the whole run — about a fifth of the steps at
+  85–99 ms, most at 120–140 ms, about a sixth at 150–170 ms, against 79 ms for linear scaling — so most of the loss
+  comes from the four steps in five that land in the slower bands, not from a floor every step pays. The cause was
+  not isolated. An earlier 8-A100 test of this recipe's previous version measured 0.77 of linear at this batch and
+  0.96 with an 8× larger batch, which is a different recipe.
+- **July's champion** (lr 3e-4, bf16 storage, head arm unrecorded) ended at val CE 3.8101 on the July validation
+  protocol, which has since changed (validation sequences now go through the same assembly as training); its
+  step-20000 checkpoint reads 3.5170 on the current one (on its own 511-position rows). It is kept as the top rung
+  of §3's budget ladder.
 
 ## 2 · The compute-optimal scaling law
 
@@ -46,9 +71,18 @@ size drops → bends → flattens to its floor; the **lower envelope is the
 compute-optimal frontier** — at each budget several sizes compete and one (★) is
 optimal.
 
-> **N_opt ∝ C^a,  a ≈ 0.52**  (Chinchilla ≈ 0.5)
+> **N_opt ∝ C^a,  a ≈ 0.50**  (0.501; Chinchilla ≈ 0.5)
 
-Cross-checked against the pre-refactor pipeline at ITS budget (500 M): the same
+These curves: one A100 per size, fp32 storage, lr 3e-4 shared by all sizes, `head_ce=liger`, the code of early
+2026-10; `scaling.py` pins this recipe except the head, `compiled` since 2026-10-22. Checked on the A100 over each
+size's first 200M tokens (2026-10-22): compiled against these liger curves at the same 28 evaluation steps differs
+by 0.004–0.005 in mean absolute val CE per size, at most 0.026, with no consistent sign; the 2B-token exponent was
+not re-measured. The curves this page shipped before (July: one RTX 5090 per size, bf16 storage) gave 0.519, and the
+same ladder in bf16 storage on the A100 gives 0.508. Moving to fp32 storage changed the exponent by −0.007, which
+comes from the compute budgets where the optimal size switches moving by up to about 12 %; what it changed most is
+the level — each size ends 0.07–0.13 lower in val CE at 2 B tokens.
+
+On the July curves: cross-checked against the pre-refactor pipeline at ITS budget (500 M), the same
 fitter on both worlds' raw curves gives **0.478 (new) vs 0.474 (old)** — two
 entirely different data pipelines, agreement to 0.004 (the old report's own
 quote, 0.54, uses a stricter overlap-range convention). The estimate grows with
@@ -56,10 +90,10 @@ the covered budget — **0.449 / 0.478 / 0.506 / 0.519 at 300 M / 500 M / 1 B /
 2 B** — as the envelope's high-compute end fills in; report the budget with the
 number. The
 refactor preserves the scaling law. One deliberate simplification: all sizes
-share the champion's LR (3e-4); a precision study would tune LR per size (the
+share one LR (3e-4, the champion's when these curves were measured); a precision study would tune LR per size (the
 pre-refactor study lists the same caveat).
 
-**A measurement note worth keeping** (→ vision's measurement-culture list): the
+**A measurement note worth keeping**: the
 frontier exponent is acutely sensitive to how EARLY each curve is sampled. A first
 attempt evaluated at a fixed LINEAR interval whose first point landed at ~12 M
 tokens — the early low-compute segment (where small models are compute-optimal over
@@ -82,28 +116,31 @@ budget progression above). Raw curves + fit:
 **Reproducing this on your own tokenizer: compare the exponent, not the CE.**
 Every CE here is per-TOKEN, so it is only comparable inside one tokenizer
 artifact — retrain the BPE and the merges change, each token carries a different
-number of bytes, and the absolute level moves even on identical data. (§1 already
-shows how badly a byte table can be misread: `token_bytes.pt` was once missing
-and "bpb 5.497" was silently bits-per-token.) The exponent is a log-log slope and
+number of bytes, and the absolute level moves even on identical data. (A byte
+table can also be misread: `token_bytes.pt` was once missing, and an early
+"bpb 5.497" was silently bits-per-token.) The exponent is a log-log slope and
 does not care: an independent reproduction on a re-trained BPE recovered
-**a = 0.508** against the 0.519 here. For a level you can compare across
+**a = 0.508** against the July curves' 0.519 (a different measurement from the A100
+bf16 ladder's 0.508 above). For a level you can compare across
 tokenizers, read `val/bpb` — normalised per UTF-8 byte — which `scaling.py` now
 records alongside CE in each trajectory point when a byte table is present. The
-curves shipped above predate that, so they carry no bpb to compare against; the
-exponent is what to check a reproduction by until a reference run records it.
+curves shipped above record it at every point, so a reproduction on another
+tokenizer can compare levels in bits per byte as well as the exponent.
 
 ## 3 · Inference
 
 Continuations from the champion through the **core KV-cache engine**
-(`core.model.inference.autoregressive_generate`), temp 0.8 / top-k 40 — coherent,
+(`core.model.inference.autoregressive_generate`), temp 0.8 / top-k 40, each prompt
+framed as training opens a row (`bos`, `text_start`, then the text) and stopped at the
+next `bos` (where the training stream ends a document) — coherent,
 grammatical English at 135M params. Four samples in
-[`example_results/samples.md`](example_results/samples.md); e.g. *"The history of the Roman
-Empire"* → *"…and the birthplace of the Roman Empire. It was founded by the
-monarchy of the 3rd century B.C. …"*. The trained model runs end-to-end as an LM,
-not just a loss number.
+[`example_results/samples.md`](example_results/samples.md); e.g. *"The best way to learn
+a new language is"* → *"to take a course in it. I have learned an entirely new
+language and learning to speak it is very different from learning a new language. …"*.
+The trained model runs end-to-end as an LM, not just a loss number.
 
-**The budget ladder** ([`inference_compare.md`](inference_compare.md)): the same
-spec at four budgets — 20M / 131M / 1.1B / 2.7B tokens (2 min → 4.4 h) =
+**The budget ladder** ([`inference_compare.md`](inference_compare.md); July: bf16
+storage, lr 3e-4, kept as measured): the same spec at four budgets — 20M / 131M / 1.1B / 2.7B tokens (2 min → 4.4 h) =
 **1.759 / 1.411 / 1.251 / 1.236 bits/byte** (shipped checkpoints, common 2 M
 window), samples side by side. Big gaps are
 visible in generation (prompt-following, then coherence, emerge rung by rung);
@@ -118,7 +155,7 @@ triton kernel (`liger`), or dodge it with inductor tiling the vocab dimension
 (`compiled`). Switch with one word:
 
 ```bash
-.venv/bin/python -m exemplars.text_pretrain.pretrain head_ce=compiled
+.venv/bin/python -m exemplars.text_pretrain.pretrain head_ce=liger   # needs the liger extra
 ```
 
 Measured on this recipe's family, one RTX 5090, seq 512, vocab 32768, audit batch
@@ -161,6 +198,6 @@ the size that once broke a 2-GPU loss-trajectory regression check at 5e-3. So th
 recipe knob, not a deployment detail — which is why there is deliberately no
 "auto": what a run computes must not depend on what is pip-installed.
 
-**This project pins `liger` because its numbers were measured there, not because it
-is the best arm.** `compiled` is faster at every depth and needs no optional package.
-Adopting it means re-pinning §1–§2, which is a measured decision, not a config edit.
+**The champion pins `compiled`** — faster at every depth, and no optional package. The scaling study
+(`scaling.py`) pinned `liger`, the arm its shipped curves were measured on, until 2026-10-22, and pins `compiled`
+now too; the curves in §2 are still the liger ones.

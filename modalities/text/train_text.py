@@ -63,10 +63,13 @@ class _CoreConfigs(SearchPathPlugin):
 
 Plugins.instance().register(_CoreConfigs)
 
-from core.training.model_setup import build_system, compile_blocks, compile_system_trunk, print0
+from core.training.model_setup import build_system, compile_blocks, compile_system_trunk
+from core.utils import print0, set_torch_global_defaults
 from core.parallel import NanoDDP, block_buckets
-from core.training.trainer import Trainer, create_optimizers
+from core.training.optim import build_optimizers
+from core.training.trainer import Trainer
 from core.model.gpt import GPT, GPTConfig  # WHICH model = this orchestrator's decision
+from core.model.system import prepare_unpacked_AR_trunk_inputs
 from core.data.mixed_dataloader import MixedDataLoader
 
 import modalities.text
@@ -74,7 +77,7 @@ import modalities.control
 from modalities.assembler import build_layout
 from modalities.control import CONTROL_TOKENS, display_form, make_control_resolver
 from modalities.text import get_tokenizer
-from modalities.text.streams import (build_evaluators, report,
+from modalities.text.streams import (build_evaluators, make_text_loader, report,
                                     report_token_supply, resolve_sources)
 
 # The orchestrator composes the source fragments of the mounted modalities.
@@ -123,6 +126,8 @@ def assemble_vocab(tokenizer):
 
 @hydra.main(version_base=None, config_path="configs", config_name="train_text")
 def main(cfg: DictConfig) -> None:
+    # Process-wide PyTorch settings (CUDA allocator, TF32) are the entry's to make, before anything uses CUDA.
+    set_torch_global_defaults()
     print0("=" * 80)
     print0("train_text — text pretraining on the assembled core (modalities/text)")
     print0("=" * 80)
@@ -169,9 +174,24 @@ def main(cfg: DictConfig) -> None:
     # earns its keep when the model stops fitting. Ignored on a single GPU.
     parallel = config.get('parallel', 'fsdp')
 
+    # What the parameters, gradients and AdamW moments are STORED in: declared in train_base.yaml,
+    # so read without a second default here.
+    import torch
+    param_dtype = {'bf16': torch.bfloat16, 'fp32': torch.float32}[config['param_dtype']]
+    if config.get('deterministic', False):
+        # Before anything compiles: dynamo restores this global after each frame, so setting it here (not via
+        # TORCHINDUCTOR_DETERMINISTIC) keeps Inductor deterministic for every graph. Set CUBLAS_WORKSPACE_CONFIG too.
+        torch.use_deterministic_algorithms(True)     # strict: warn_only=True leaves e.g. the flash-attention backward nondeterministic
+        import atexit       # the mode has to be checked on, not assumed
+        atexit.register(lambda: print0(f"[deterministic] at exit: algorithms={torch.are_deterministic_algorithms_enabled()} "
+                                       f"inductor={torch._inductor.config.deterministic}"))
+    # Text batches carry one window per row (PaddingBatcher): ordinary causal attention over each row. Chosen here,
+    # where the System is assembled; training and the LM evaluation both go through it.
     setup = build_system(trunk_cls, gpt_config, parallel=parallel,
                          head_ce=config.get('head_ce', 'naive'),
-                         seed=config.get('seed', 42))
+                         seed=config.get('seed', 42),
+                         prepare_trunk_inputs_fn=prepare_unpacked_AR_trunk_inputs,
+                         param_dtype=param_dtype)
     system = setup['system']
     rank = setup['rank']
     world_size = setup['world_size']
@@ -202,26 +222,22 @@ def main(cfg: DictConfig) -> None:
     # --- Data: the TWO system objects (layout + resolver) ride the shared bag ---
     data_config = config['data']
     device = 'cuda'
-    sources = resolve_sources(data_config, sequence_len, device=device)
+    # sequence_len is T, the positions per row, for the Trainer, the GPT and the batcher alike; each source reads
+    # T + 1 raw tokens per window. The sources run on the CPU; the loader supervises and batches there and moves
+    # each batch field to the GPU once.
+    sources = resolve_sources(data_config, sequence_len, device='cpu')
 
-    loader_config = {
-        'batch_size': device_batch_size,
-        'data': {
-            'sequence_len': sequence_len,
-            'sources': sources,
-        },
-    }
+    loader_config = {'data': {'sources': sources}}
     print0(f"\nBuilding MixedDataLoader ({len(sources)} source(s))...")
-    dataloader = MixedDataLoader(
-        loader_config=loader_config,
-        tokenizers={'text': tokenizer, 'layout': layout, 'control_resolver': control_resolver},
-        source_types=SOURCE_TYPES,
-        resume_state_dict=None,
+    dataloader = make_text_loader(
+        loader_config,
+        {'text': tokenizer, 'layout': layout, 'control_resolver': control_resolver},
+        SOURCE_TYPES, batch_size=device_batch_size, sequence_len=sequence_len, device=device,
     )
 
     # --- Optimizers (built from the system, grouped by trunk/head) ---
     print0("Creating optimizers...")
-    optimizers = create_optimizers(system, optimizer_config, world_size=world_size)
+    optimizers = build_optimizers(system, optimizer_config)
 
     # --- Evaluators: declared streams, assembled by the SAME path as training ---
     tokenizers = {'text': tokenizer, 'layout': layout, 'control_resolver': control_resolver}
@@ -239,7 +255,6 @@ def main(cfg: DictConfig) -> None:
         config=config,
         rank=rank,
         world_size=world_size,
-        debug_tokenizer=tokenizer,
         evaluators=evaluators,
         ddp=ddp,
     )

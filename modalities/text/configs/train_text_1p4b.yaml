@@ -45,6 +45,11 @@ total_batch_size: 65536
 # not the parameter count on its own.
 parallel: ddp
 
+# Storage: bf16, as measured below. fp32 storage (core's default since 2026-10) adds 8 bytes per parameter for the
+# weights, their gradients and the AdamW moments, about 11.6 GB at 1.45B, which no longer fits a 32 GB card under
+# ddp. For fp32 storage, switch to fsdp and re-measure.
+param_dtype: bf16
+
 max_steps: 20000
 
 # Measured, 2 x RTX 5090 (PCIe, no NVLink), this exact config at max_steps=10:

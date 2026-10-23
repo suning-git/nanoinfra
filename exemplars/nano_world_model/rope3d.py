@@ -12,6 +12,12 @@ regime of this exemplar — there is no 1D fallback knob, because a knob would
 imply an open question and this one is settled (the research twin's entire
 long-window line trains on it).
 
+THE TABLE IS THE ROW'S: row position p -> the (t, y, x) of the token there, row_len
+rows. Training feeds two copies of the row, and the noisy copy of a position reads the
+SAME table row as its clean twin (block_diffusion.py passes the position as
+`position_ids`), so a masked cell is rotated exactly like the clean cell it stands for;
+the sampler's KV cache reads it by position as the row is written (inference/).
+
 WHERE tokens sit comes from RowLayout's slot arrays — this file only says WHAT
 coordinate each kind of slot gets:
 
@@ -71,7 +77,7 @@ def coords_from_layout(rows, seq_len=None):
         t[sl] = float(td) * b + np.arange(td) + 0.5
 
     coords = np.stack([t, y, x], axis=1)
-    if seq_len is not None and seq_len != len(coords):   # pad (mirror overrides anyway)
+    if seq_len is not None and seq_len != len(coords):   # extend with the end coordinate, or cut
         pad = np.tile(np.array([[end_t, 0.0, 0.0]], dtype=np.float32),
                       (max(0, seq_len - len(coords)), 1))
         coords = np.concatenate([coords, pad])[:seq_len]
@@ -102,16 +108,15 @@ def cos_sin_3d(coords, head_dim, pairs=None):
 
 
 def install_rope3d(trunk, rows):
-    """Overwrite a core GPT's rotary tables with the 3D ones. The buffers are
-    non-persistent, so this must run AFTER build (and after a checkpoint load,
-    which leaves them alone — a freshly loaded model still carries 1D tables
-    until this runs). For the diffusion objective, run BEFORE
-    RowLayout.install_mirror_rope — the mirror reindexes whatever is installed."""
-    cfg = trunk.config
-    coords = coords_from_layout(rows, seq_len=cfg.sequence_len)
-    cos, sin = cos_sin_3d(coords, cfg.n_embd // cfg.n_head)
+    """Overwrite a core GPT's rotary table with the row's 3D one (row_len rows; the
+    module docstring says who reads it how). The buffers are non-persistent, so this
+    must run AFTER build and after a checkpoint load, which leaves them alone — a
+    freshly loaded model still carries 1D tables until this runs — and before the
+    trunk is compiled. Returns the coordinates."""
+    coords = coords_from_layout(rows)
+    cos, sin = cos_sin_3d(coords, trunk.config.n_embd // trunk.config.n_head)
     dev = trunk.cos.device
-    trunk.cos, trunk.sin = cos.to(dev), sin.to(dev)
+    trunk.set_rotary_table(cos.to(dev), sin.to(dev))
     return coords
 
 

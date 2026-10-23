@@ -1,8 +1,16 @@
 """
-LR Scheduler Registry for nanoinfra trainer.
+Learning-rate schedules for the Trainer: a multiplier on each parameter group's initial_lr, step by step.
 
-Provides configurable learning rate schedules via a registry pattern.
-Each scheduler is a pure function: (step, config) -> multiplier.
+    schedule = build_lr_schedule(scheduler_config, max_steps)   # once, when the run's max_steps is known
+    multiplier = schedule(step)                                  # every step: arithmetic only
+
+build_lr_schedule reads the config, fills its defaults and checks every rule there, once; the schedule it returns
+holds the resolved numbers and only computes. A rule that depends on max_steps (warmup and warmdown must fit in it)
+waits for the final value, which the Trainer resolves when the config says -1.
+
+Another schedule: the orchestrator replaces lr_schedulers.build_lr_schedule before it builds the Trainer,
+with a function (config, max_steps) -> any callable step -> multiplier; the Trainer looks it
+up on this module.
 
 Usage in config:
     optimizer:
@@ -18,122 +26,97 @@ changes). If a recipe thinks in fractions, the ORCHESTRATOR converts
 (steps = ratio * max_steps). Warmdown stays a FRACTION on purpose: it is
 anchored to the END of the horizon (and with Chinchilla auto-sizing the
 horizon isn't statically known), so a fraction IS its natural parameter.
-
-Usage in code:
-    from core.training.lr_schedulers import get_lr_multiplier
-    multiplier = get_lr_multiplier(step, scheduler_config)
 """
 
 import math
-from typing import Callable
-
-# Type alias for scheduler functions
-SchedulerFn = Callable[[int, dict], float]
+from dataclasses import dataclass
 
 
-def linear_schedule(step: int, config: dict) -> float:
+@dataclass(frozen=True)
+class LinearSchedule:
+    """Warmup -> constant -> linear warmdown toward final_lr_frac. The target is reached at step max_steps, one past
+    the last update (steps run 0 .. max_steps - 1), so the last update uses a little more; with no warmdown it stays
+    1."""
+    max_steps: int
+    warmup_steps: int
+    warmdown_ratio: float
+    final_lr_frac: float
+
+    @property
+    def warmdown_steps(self) -> int:
+        return round(self.warmdown_ratio * self.max_steps)
+
+    def __call__(self, step: int) -> float:
+        warmdown_steps = self.warmdown_steps
+        if step < self.warmup_steps:
+            # Linear warmup: 0 -> 1
+            return (step + 1) / self.warmup_steps
+        elif step <= self.max_steps - warmdown_steps:
+            # Constant phase
+            return 1.0
+        else:
+            # Linear warmdown: 1 -> final_lr_frac
+            progress = (self.max_steps - step) / warmdown_steps
+            return progress * 1.0 + (1 - progress) * self.final_lr_frac
+
+
+@dataclass(frozen=True)
+class CosineSchedule:
+    """Warmup -> cosine annealing toward final_lr_frac, reached at step max_steps, one past the last update."""
+    max_steps: int
+    warmup_steps: int
+    final_lr_frac: float
+
+    def __call__(self, step: int) -> float:
+        if step < self.warmup_steps:
+            # Linear warmup: 0 -> 1
+            return (step + 1) / self.warmup_steps
+        else:
+            # Cosine annealing: 1 -> final_lr_frac
+            progress = (step - self.warmup_steps) / (self.max_steps - self.warmup_steps)
+            return self.final_lr_frac + (1 - self.final_lr_frac) * 0.5 * (1 + math.cos(math.pi * progress))
+
+
+def build_lr_schedule(config: dict, max_steps: int):
     """
-    Warmup -> Constant -> Linear warmdown schedule.
+    The schedule `config` describes, for a run of `max_steps` steps; every rule is checked here.
 
-    Config params:
-        max_steps: Total training steps (required)
+    Config keys (optimizer.scheduler):
+        type: 'linear' (default) or 'cosine'
         warmup_steps: ABSOLUTE warmup steps (default: 0; see module note)
-        warmdown_ratio: Fraction of steps for warmdown (default: 0.2)
-        final_lr_frac: Final LR as fraction of max (default: 0.0)
-
-    Returns:
-        LR multiplier in [final_lr_frac, 1.0]
-    """
-    assert 'warmup_ratio' not in config, (
-        "warmup_ratio was removed: core speaks ABSOLUTE warmup steps (a ratio "
-        "re-tunes the recipe whenever the budget changes). Convert at the "
-        "orchestrator: warmup_steps = ratio * max_steps.")
-    max_steps = config['max_steps']
-    warmup_steps = int(config.get('warmup_steps', 0))
-    warmdown_ratio = config.get('warmdown_ratio', 0.2)
-    final_lr_frac = config.get('final_lr_frac', 0.0)
-
-    # Validate parameters
-    assert max_steps > 0, f"max_steps must be positive, got {max_steps}"
-    assert 0 <= warmdown_ratio < 1, f"warmdown_ratio must be in [0, 1), got {warmdown_ratio}"
-    assert 0 <= final_lr_frac <= 1, f"final_lr_frac must be in [0, 1], got {final_lr_frac}"
-
-    warmdown_steps = round(warmdown_ratio * max_steps)
-    assert 0 <= warmup_steps <= max_steps - warmdown_steps, \
-        f"warmup_steps ({warmup_steps}) + warmdown ({warmdown_steps}) exceed max_steps ({max_steps})"
-
-    if step < warmup_steps:
-        # Linear warmup: 0 -> 1
-        return (step + 1) / warmup_steps
-    elif step <= max_steps - warmdown_steps:
-        # Constant phase
-        return 1.0
-    else:
-        # Linear warmdown: 1 -> final_lr_frac
-        progress = (max_steps - step) / warmdown_steps
-        return progress * 1.0 + (1 - progress) * final_lr_frac
-
-
-def cosine_schedule(step: int, config: dict) -> float:
-    """
-    Warmup -> Cosine annealing schedule.
-
-    Config params:
-        max_steps: Total training steps (required)
-        warmup_steps: ABSOLUTE warmup steps (default: 0; see module note)
-        final_lr_frac: Final LR as fraction of max (default: 0.0)
-
-    Returns:
-        LR multiplier in [final_lr_frac, 1.0]
-    """
-    assert 'warmup_ratio' not in config, (
-        "warmup_ratio was removed: core speaks ABSOLUTE warmup steps (a ratio "
-        "re-tunes the recipe whenever the budget changes). Convert at the "
-        "orchestrator: warmup_steps = ratio * max_steps.")
-    max_steps = config['max_steps']
-    warmup_steps = int(config.get('warmup_steps', 0))
-    final_lr_frac = config.get('final_lr_frac', 0.0)
-
-    # Validate parameters
-    assert max_steps > 0, f"max_steps must be positive, got {max_steps}"
-    assert 0 <= warmup_steps < max_steps, f"warmup_steps must be in [0, max_steps), got {warmup_steps}"
-    assert 0 <= final_lr_frac <= 1, f"final_lr_frac must be in [0, 1], got {final_lr_frac}"
-
-    if step < warmup_steps:
-        # Linear warmup: 0 -> 1
-        return (step + 1) / warmup_steps
-    else:
-        # Cosine annealing: 1 -> final_lr_frac
-        progress = (step - warmup_steps) / (max_steps - warmup_steps)
-        return final_lr_frac + (1 - final_lr_frac) * 0.5 * (1 + math.cos(math.pi * progress))
-
-
-# Registry: scheduler_type -> function
-SCHEDULERS: dict[str, SchedulerFn] = {
-    'linear': linear_schedule,
-    'cosine': cosine_schedule,
-}
-
-
-def get_lr_multiplier(step: int, config: dict) -> float:
-    """
-    Get LR multiplier for current step using configured scheduler.
-
-    Args:
-        step: Current training step
-        config: Scheduler config dict containing:
-            - type: Scheduler type ('linear' or 'cosine')
-            - max_steps: Total training steps
-            - Scheduler-specific params (warmup_steps, etc.)
-
-    Returns:
-        LR multiplier to apply to initial learning rates
+        warmdown_ratio: linear only, the fraction of steps for warmdown (default: 0.2)
+        final_lr_frac: where the decay heads, as a fraction of each group's initial LR (default: 0.0)
 
     Raises:
-        ValueError: If scheduler type is unknown
+        ValueError: an unknown type, the removed warmup_ratio, or a value out of range
     """
+    if 'warmup_ratio' in config:
+        raise ValueError(
+            "warmup_ratio was removed: core speaks ABSOLUTE warmup steps (a ratio "
+            "re-tunes the recipe whenever the budget changes). Convert at the "
+            "orchestrator: warmup_steps = ratio * max_steps.")
     scheduler_type = config.get('type', 'linear')
-    if scheduler_type not in SCHEDULERS:
-        available = ', '.join(sorted(SCHEDULERS.keys()))
-        raise ValueError(f"Unknown scheduler type: '{scheduler_type}'. Available: {available}")
-    return SCHEDULERS[scheduler_type](step, config)
+    warmup_steps = int(config.get('warmup_steps', 0))
+    final_lr_frac = config.get('final_lr_frac', 0.0)
+    if scheduler_type not in ('linear', 'cosine'):
+        raise ValueError(f"Unknown scheduler type: '{scheduler_type}'. Available: cosine, linear")
+    if not max_steps > 0:
+        raise ValueError(f"max_steps must be positive, got {max_steps}")
+    if not 0 <= final_lr_frac <= 1:
+        raise ValueError(f"final_lr_frac must be in [0, 1], got {final_lr_frac}")
+    if warmup_steps < 0:
+        raise ValueError(f"warmup_steps must be >= 0, got {warmup_steps}")
+
+    if scheduler_type == 'linear':
+        warmdown_ratio = config.get('warmdown_ratio', 0.2)
+        if not 0 <= warmdown_ratio < 1:
+            raise ValueError(f"warmdown_ratio must be in [0, 1), got {warmdown_ratio}")
+        schedule = LinearSchedule(max_steps, warmup_steps, warmdown_ratio, final_lr_frac)
+        if not warmup_steps <= max_steps - schedule.warmdown_steps:
+            raise ValueError(f"warmup_steps ({warmup_steps}) + warmdown ({schedule.warmdown_steps}) exceed "
+                             f"max_steps ({max_steps})")
+        return schedule
+
+    if not warmup_steps < max_steps:
+        raise ValueError(f"warmup_steps must be in [0, max_steps), got {warmup_steps}")
+    return CosineSchedule(max_steps, warmup_steps, final_lr_frac)

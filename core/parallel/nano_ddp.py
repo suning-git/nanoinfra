@@ -293,13 +293,6 @@ class NanoDDP:
     garbage collected, and a forgotten one keeps reducing alongside its replacement.
     """
 
-    # Issuing buckets in completion order instead of list order is silently wrong
-    # whenever ranks have differently-shaped backwards (see _release). This attribute
-    # exists ONLY so the gate that catches that bug can prove it still catches it:
-    # the multi-GPU integration test sets it to False for its positive control. It is
-    # not a constructor argument, because nothing in production should ever set it.
-    canonical_order = True
-
     _OWNER = "_nano_ddp_owner"               # marker left on parameters we hook
 
     def __init__(self, buckets, *, module, strict=True, stream=None, group=None):
@@ -480,13 +473,9 @@ class NanoDDP:
         # Drain the tail IN ORDER: buckets that never completed are zero-filled by
         # _fire, and buckets that completed early but were waiting their turn go out
         # here. Every rank issues 0..n-1 exactly once, whatever its routing did.
-        if self.canonical_order:
-            while self._next < len(self.buckets):
-                self._fire(self._next)
-                self._next += 1
-        else:
-            for bucket_index, _ in incomplete:
-                self._fire(bucket_index)
+        while self._next < len(self.buckets):
+            self._fire(self._next)
+            self._next += 1
 
         # The strict check must be COLLECTIVE: whether a bucket completed is a per-rank
         # fact — that is the whole point of the guard — so a purely local raise lets the
@@ -586,10 +575,10 @@ class NanoDDP:
         backward on one rank and is deferred to finalize() on another; the two ranks
         then issue the same SET of buckets in a different ORDER, the shapes still
         match, NCCL does not complain, and one block's gradients are averaged against
-        another's. Measured on the gate before this existed: 4 of 10 tensors wrong,
-        with a relative error of order 1 (the gate uses random data, so the exact
-        figure moves run to run — what is stable is that the gradients are not merely
-        imprecise, they are the wrong tensors).
+        another's. Measured before this existed, with two ranks routing to different
+        experts: 4 of 10 tensors wrong, with a relative error of order 1 (random data,
+        so the exact figure moves run to run — what is stable is that the gradients are
+        not merely imprecise, they are the wrong tensors).
 
         So a bucket is issued only once every earlier bucket has been. Buckets that
         finish early wait; finalize() drains the tail in the same order. Both ranks
@@ -597,9 +586,6 @@ class NanoDDP:
         structural rather than emergent. On a dense model this costs nothing, because
         completion order already IS list order (see block_buckets).
         """
-        if not self.canonical_order:
-            self._fire(bucket_index)                  # pre-fix behaviour; test knob only
-            return
         self._ready[bucket_index] = True
         while self._next < len(self.buckets) and self._ready[self._next]:
             self._fire(self._next)

@@ -114,10 +114,6 @@ class GPT2Trunk(nn.Module):
         # must set EVERY parameter, LayerNorm included (a default nn.LayerNorm would
         # only get weight=1 / bias=0 at construction, which meta-init skips).
         self.apply(self._init_weights)
-        # match the modern trunk: bf16 embeddings on CUDA (memory; optim tolerates it)
-        if self.transformer.wte.weight.device.type == "cuda":
-            self.transformer.wte.to(dtype=torch.bfloat16)
-            self.transformer.wpe.to(dtype=torch.bfloat16)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -142,7 +138,9 @@ class GPT2Trunk(nn.Module):
     def get_device(self):
         return self.transformer.wte.weight.device
 
-    def forward(self, idx, token_types=None, kv_cache=None, block_mask=None):
+    def forward(self, idx, token_types=None, kv_cache=None, *, attention="causal"):
+        if attention != "causal":
+            raise ValueError(f'GPT2Trunk computes causal attention only, got attention={attention!r}')
         B, T = idx.shape
         pos = torch.arange(T, device=idx.device)
         x = self.transformer.wte(idx) + self.transformer.wpe(pos)

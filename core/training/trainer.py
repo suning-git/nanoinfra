@@ -31,7 +31,8 @@ import time
 import torch
 
 from core.utils import print0, DummyWandb
-from core.training.lr_schedulers import get_lr_multiplier
+from core.training import precision
+from core.training import lr_schedulers
 from core.training.optim_resume import ADJUSTABLE, reconcile_hparams, snapshot_hparams
 from core.parallel import sync_gradients
 
@@ -49,7 +50,7 @@ def clip_gradients(system, max_grad_norm: float, step: int,
     norm makes the scale factor nan and poisons every gradient in the model.
 
     Aborting rather than skipping the step: this loop is bf16 autocast with no
-    GradScaler (see Trainer.__init__), so there is no loss-scaling regime here in
+    GradScaler (core/training/precision.py), so there is no loss-scaling regime here in
     which an occasional non-finite gradient is routine and gets skipped. It is a
     bug every time, and the next opt.step() would write it into the weights.
 
@@ -67,30 +68,13 @@ def clip_gradients(system, max_grad_norm: float, step: int,
         )
     except RuntimeError as e:
         # torch's message does not carry the step, and the step is the first thing
-        # a post-mortem needs. The gradients are UNCLIPPED at this point.
+        # a post-mortem needs. The cause is whatever torch raised; it is not assumed here.
         raise RuntimeError(
-            f"non-finite gradient norm at step {step} — aborted before clipping, so "
-            f".grad still holds the raw per-parameter values (scan them to find which "
-            f"module produced it).\n"
-            f"  The optimizer has not stepped on these gradients. Whether the WEIGHTS "
-            f"are finite depends on where the run started; check, do not assume.\n"
-            f"  To train through it anyway: abort_on_nonfinite: false — but in bf16 "
-            f"without a loss scaler this does not recover, it only hides."
+            f"gradient clipping raised at step {step}; the cause is torch's error above"
         ) from e
     grad_norm = grad_norm_tensor.item() if hasattr(grad_norm_tensor, 'item') \
         else float(grad_norm_tensor)
-    if not math.isfinite(grad_norm):
-        if abort_on_nonfinite:
-            # Belt and braces. torch's error_if_nonfinite should have raised above,
-            # so reaching here means the norm came back non-finite by some path that
-            # check did not cover. Abort anyway — the guarantee this function offers
-            # is "the optimizer never steps on a non-finite gradient", and that
-            # guarantee must not depend on one upstream implementation detail.
-            raise RuntimeError(
-                f"non-finite gradient norm ({grad_norm}) at step {step}, and torch's "
-                f"error_if_nonfinite did not catch it — the gradients HAVE been "
-                f"scaled by now, so a per-parameter scan will read nan everywhere."
-            )
+    if not abort_on_nonfinite and not math.isfinite(grad_norm):
         # abort_on_nonfinite is off. Say it once, loudly: the incident this guard
         # exists for was 277 steps of nan that nothing in the log ever named.
         print0(f"[step {step}] non-finite gradient norm ({grad_norm}) and "
@@ -99,19 +83,11 @@ def clip_gradients(system, max_grad_norm: float, step: int,
     return grad_norm
 
 
-def create_optimizers(system, optimizer_config: dict, world_size: int):
-    """Build the multi-LR AdamW optimizers for an LMSystem.
-
-    Thin wrapper kept for orchestrator import-compatibility; delegates to
-    core.training.optim.build_optimizers (groups sourced by trunk/head ownership).
-    """
-    from core.training.optim import build_optimizers
-    return build_optimizers(system, optimizer_config, world_size)
-
-
 def detect_gpu_type() -> tuple[str, float | None]:
     """
-    Auto-detect the GPU and return its bf16 peak, for the MFU denominator.
+    Auto-detect this process's GPU (the current CUDA device, which the assembly has selected by the time the
+    Trainer is built) and return its bf16 peak, for the MFU denominator. The hardware counterpart of
+    core.utils.process_identity: it asks CUDA, so it is called on demand, not at import.
 
     Returns:
         tuple: (gpu_name, promised_flops)
@@ -127,7 +103,7 @@ def detect_gpu_type() -> tuple[str, float | None]:
     also permanently incomplete -- A800, L40S, V100, B200 are all one more entry
     away -- so the miss path has to be survivable rather than merely documented.
     """
-    gpu_device_name = torch.cuda.get_device_name(0).upper()
+    gpu_device_name = torch.cuda.get_device_name().upper()
 
     # GPU performance specs (bf16 TFLOPS)
     gpu_specs = {
@@ -185,9 +161,10 @@ def eval_is_due(evaluators, step, last_step) -> bool:
     checkpointers, so a flag is their only way to say it.
 
     Last step is unconditional otherwise: a run that evaluates at all should end with
-    a final number, whatever the cadence says. Step 0 also always fires, because
-    `should_eval` is `step % interval == 0` — that is deliberate, it is the
-    before-training baseline, not an accident of the modulo.
+    a final number, whatever the cadence says. With an interval cadence step 0 also
+    fires, because `should_eval` is `step % interval == 0`. The loop evaluates a step
+    after that step's update, so step 0's reading is of the model after its first
+    update, not a before-training baseline.
     """
     if not evaluators:
         return False
@@ -202,17 +179,21 @@ class Trainer:
     Extensible via inheritance for custom evaluation or training steps.
 
     DataLoader Interface (duck typing):
-        The dataloader must be an iterable yielding dicts with these required keys:
-        - idx: [B, T] token IDs
-        - token_types: [B, T] token type IDs (0=text, 1=motion, 2=control)
-        - targets: [B, T] target token IDs
+        The dataloader is an iterable yielding batch dicts. The Trainer reads one key
+        itself: `state_dict` (optional: the data state saved with each checkpoint, in
+        meta.json, so it must read back from JSON unchanged; see DataSource.get_state). The
+        whole batch goes to `system.loss(batch)`, so which other fields a batch carries is
+        between the loader and the System. core's MixedDataLoader yields the data fields
+        ([B, T, ...], e.g. idx, token_types, targets) plus doc_id, doc_pos, sample_meta,
+        layout_facts and state_dict (core/data/mixed_dataloader.py). For resume, the
+        dataloader may also provide get_state() / set_state(state), and merge_rank_snapshots
+        (each rank's state_dict -> the run's, which the checkpoint keeps; without it, rank
+        0's is kept: core.model.checkpoint_manager.merge_data_snapshots). The token count and the
+        accumulation steps come from device_batch_size and sequence_len, so the batches must
+        have that shape: the orchestrator builds the batcher from the same two numbers.
 
-        Optional keys (ignored by Trainer):
-        - state_dict: Dataloader checkpoint state
-        - attention_mask: Internal use only (already converted to -1 in targets)
-
-        IMPORTANT: The dataloader MUST be infinite (cycle through data indefinitely).
-        If it raises StopIteration, training will fail immediately to expose the issue.
+        The dataloader must supply enough batches for the run's steps: if it runs out, the
+        StopIteration propagates and training stops there.
 
     Example:
         >>> trainer = Trainer(
@@ -228,13 +209,12 @@ class Trainer:
 
     def __init__(
         self,
-        system,          # LMSystem (trunk + head); holds its own compiled trunk
+        system,          # LMSystem (trunk + head); its trunk may be compiled in place
         optimizers,      # List of optimizers
         dataloader,      # Data loader (duck typing interface)
         config,          # Config dict with all needed fields
         rank,
         world_size,
-        debug_tokenizer=None,  # Optional tokenizer for debug printing
         evaluators=None,       # List of Evaluator objects for validation
         ddp=None,              # Optional NanoDDP for replicated data parallel
     ):
@@ -243,10 +223,10 @@ class Trainer:
 
         Args:
             system: LMSystem exposing loss(batch)->scalar + nn.Module (params/state_dict/
-                train-eval). The compiled trunk lives inside it; grad clip/optim use its
-                raw registered params. Replaces the old model/orig_model split.
+                train-eval). Its trunk may be compiled in place, so grad
+                clip/optim see the same registered params. Replaces the old model/orig_model split.
             optimizers: List of optimizers
-            dataloader: Iterable yielding batches (dict with idx, token_types, targets)
+            dataloader: Iterable yielding batch dicts for system.loss(batch) (see the class docstring)
             config: Full training configuration dict with required top-level keys:
                 - max_steps: Total training steps (int, -1 for auto-calculation)
                 - target_param_data_ratio: For auto-calculating max_steps (int, default: 20)
@@ -261,7 +241,7 @@ class Trainer:
             rank: Distributed rank
             world_size: Distributed world size
             ddp: Optional gradient synchronizer for REPLICATED data parallel
-                (core.training.data_parallel.NanoDDP). None under FSDP or on one
+                (core.parallel.NanoDDP). None under FSDP or on one
                 GPU, where nothing extra is needed: FSDP reduces inside its own
                 hooks, and one GPU has nothing to reduce.
         """
@@ -272,7 +252,6 @@ class Trainer:
         self.config = config
         self.rank = rank
         self.world_size = world_size
-        self.debug_tokenizer = debug_tokenizer
         self.evaluators = evaluators or []
 
         # Extract config fields (from flattened structure)
@@ -292,8 +271,9 @@ class Trainer:
             f"total_batch_size ({self.total_batch_size}) must be divisible by tokens_per_step ({tokens_per_step})"
         self.grad_accum_steps = self.total_batch_size // tokens_per_step
 
-        # Setup autocast for mixed precision
-        self.autocast_ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
+        # The training execution convention (bf16 autocast; core/training/precision.py), entered around each forward
+        # and handed to the evaluators.
+        self.autocast_ctx = precision.training_autocast()
 
         # Master process flag
         self.master_process = (rank == 0)
@@ -304,7 +284,7 @@ class Trainer:
             target_param_data_ratio = config.get('target_param_data_ratio', 20)
             num_params = sum(p.numel() for p in system.parameters())
             target_tokens = target_param_data_ratio * num_params
-            self.max_steps = target_tokens // self.total_batch_size
+            self.max_steps = int(target_tokens // self.total_batch_size)   # a float ratio (1.0) gave 10.0
 
             if self.master_process:
                 print0(f"\n{'='*80}")
@@ -340,9 +320,10 @@ class Trainer:
         self.checkpoint_config = config.get('checkpoint', {})
         self.checkpoint_enabled = self.checkpoint_config.get('enabled', False)
 
-        # Scheduler config: extract from optimizer.scheduler and add max_steps
-        scheduler_config = self.optimizer_config.get('scheduler', {})
-        self.scheduler_config = {**scheduler_config, 'max_steps': self.max_steps}
+        # The LR schedule for this run's max_steps (resolved above when the config says -1), its rules checked here,
+        # once: before a checkpoint is loaded or a step is trained. Looked up on the module, so an orchestrator that
+        # replaces lr_schedulers.build_lr_schedule (H12) gets its own schedule here.
+        self.lr_schedule = lr_schedulers.build_lr_schedule(self.optimizer_config.get('scheduler', {}), self.max_steps)
 
         # Profiling configuration (optional, for performance debugging)
         profiling_config = config.get('profiling', {})
@@ -362,6 +343,9 @@ class Trainer:
         adopt = self.checkpoint_config.get('override_optimizer_hparams', False)
         if not isinstance(adopt, bool):
             raise TypeError(f"checkpoint.override_optimizer_hparams must be true or false, got {adopt!r}")
+        allow = self.checkpoint_config.get('allow_param_dtype_change', False)   # now, not first at a resume after a
+        if not isinstance(allow, bool):                                          # preemption
+            raise TypeError(f"checkpoint.allow_param_dtype_change must be true or false, got {allow!r}")
         from core.model.checkpoint_manager import load_checkpoint_if_needed
         self.start_step, self._resumed_trainer_state = load_checkpoint_if_needed(
             checkpoint_config=self.checkpoint_config,
@@ -389,16 +373,11 @@ class Trainer:
             print0(f"  adopted this launch's optimizer[{i}].param_groups[{j}].{k}: {old!r} -> {new!r}")
         if not self._resume_changes:
             print0("  no change" + (" (override on, nothing differed)" if adopt else ""))
-        sc = self.scheduler_config
-        warmdown = (f" warmdown_ratio={sc.get('warmdown_ratio', 0.2)}"
-                    if sc.get('type', 'linear') == 'linear' else "")
         if self.start_step < self.max_steps:
-            nxt = f"LR multiplier at step {self.start_step} = {get_lr_multiplier(self.start_step, sc):.4f}"
+            nxt = f"LR multiplier at step {self.start_step} = {self.lr_schedule(self.start_step):.4f}"
         else:   # No upcoming update: skip evaluating the schedule outside the training budget.
             nxt = f"start step {self.start_step} is at/after max_steps, nothing to train"
-        print0(f"  schedule this launch: {sc.get('type', 'linear')} max_steps={self.max_steps} "
-               f"warmup_steps={sc.get('warmup_steps', 0)}{warmdown} "
-               f"final_lr_frac={sc.get('final_lr_frac', 0.0)}; {nxt}\n")
+        print0(f"  schedule this launch: {self.lr_schedule}; {nxt}\n")
 
     def train(self):
         """
@@ -437,7 +416,13 @@ class Trainer:
             total_training_time = 0.0  # Cumulative training time
             ema_factor = 1.0  # Tracks (1 - beta^(step+1)) for debiasing
 
-        while step < self.max_steps:
+        # This launch ends at max_steps, or earlier where num_iterations stops it (that many steps from where it
+        # started; the learning rate still follows the schedule over max_steps). Its last step is logged, evaluated
+        # and saved either way.
+        end = (self.max_steps if self.num_iterations == -1
+               else min(self.max_steps, self.start_step + self.num_iterations))
+        while step < end:
+            last_step = (step == end - 1)
             # Start profiling
             if self.profiling_enabled and step == self.profile_start_step:
                 self._start_profiler()
@@ -467,7 +452,7 @@ class Trainer:
             total_training_time += dt
 
             # Console logging
-            if step % self.log_every == 0 or step == self.max_steps - 1:
+            if step % self.log_every == 0 or last_step:
                 metrics = self._calculate_metrics(step, dt)
                 progress_str = self._get_progress_string(step)
                 mfu_str = (f"{metrics['mfu']:.2f}%" if metrics['mfu'] is not None
@@ -482,15 +467,9 @@ class Trainer:
                     f"mfu: {mfu_str} | "
                     f"total time: {total_training_time/60:.2f}m"
                 )
-                # Debug: print optimizer state (disabled)
-                # self._debug_print_optimizer_state(step)
-
-            # GPU memory breakdown at step 10
-            # if step == 10 and self.device_type == 'cuda':
-            #     self._debug_print_gpu_memory(step)
 
             # Metrics (the same dict goes to whatever _init_metrics returned)
-            if step % self.wandb_log_every == 0 or step == self.max_steps - 1:
+            if step % self.wandb_log_every == 0 or last_step:
                 metrics = self._calculate_metrics(step, dt)
                 log_data = {
                     "step": step,
@@ -509,7 +488,6 @@ class Trainer:
                 metrics_run.log(log_data)
 
             # Evaluation
-            last_step = (step == self.max_steps - 1)
             if eval_is_due(self.evaluators, step, last_step):
                 eval_results = self._evaluate(step, force=last_step)
                 metrics = self._calculate_metrics(step, dt)
@@ -535,6 +513,13 @@ class Trainer:
                     'smooth_train_loss': smooth_train_loss,
                     'ema_factor': ema_factor,
                     'total_training_time': total_training_time,
+                    # How this run computed, for whoever reads the checkpoint later (nothing reads them back): the
+                    # execution convention, and the float32 matmul precision setting at this save (the entry's):
+                    # PyTorch's per-backend setting, "tf32", "ieee", or "none" if never set (the legacy setter writes
+                    # it too, "high" and "medium" as "tf32"); not the legacy getter, which raises once the
+                    # per-backend API has been used. A setting, not proof of the algorithm each kernel ran.
+                    'training_precision': precision.NAME,
+                    'cuda_matmul_fp32_precision': torch.backends.cuda.matmul.fp32_precision,
                 }
                 save_checkpoint_if_needed(
                     step, self.system, self.optimizers,
@@ -542,18 +527,16 @@ class Trainer:
                     dataloader_state=current_dataloader_state,
                     trainer_state=trainer_state,
                     dataloader=self.dataloader,
+                    max_steps=end,   # this launch's end (max_steps resolved here, or num_iterations's stop)
                 )
 
             # Increment step counter
             step += 1
 
-            # Early stopping check (num_iterations = steps to run from start)
-            if self.num_iterations != -1 and (step - self.start_step) >= self.num_iterations:
-                if self.master_process:
-                    print0(f"\n{'='*80}")
-                    print0(f"Early stopping: reached num_iterations={self.num_iterations}")
-                    print0(f"{'='*80}\n")
-                break
+        if end < self.max_steps and self.master_process:
+            print0(f"\n{'='*80}")
+            print0(f"Early stopping: reached num_iterations={self.num_iterations}")
+            print0(f"{'='*80}\n")
 
         # Training complete
         self._print_completion_info()
@@ -569,7 +552,7 @@ class Trainer:
         Returns:
             float: Learning rate multiplier
         """
-        lrm = get_lr_multiplier(step, self.scheduler_config)
+        lrm = self.lr_schedule(step)
         for opt in self.optimizers:
             for param_group in opt.param_groups:
                 param_group['lr'] = param_group['initial_lr'] * lrm
@@ -585,6 +568,14 @@ class Trainer:
 
         Returns:
             dict: Metrics including tokens_per_sec, flops_so_far, flops_per_sec, mfu
+
+        What these count: POSITIONS, not tokens of data. total_batch_size is rows x row length x micro-batches x
+        ranks, so padding positions are included; and the FLOPs are the System's per-position estimate times that
+        count, which is right for one sample per row under dense causal attention. With padding, or several samples
+        per row each attending only within itself (packing), tok/s includes the padding and MFU reads high (a
+        packed video run read 180-340%). Deliberately not corrected per batch: fill and real FLOPs vary from batch
+        to batch with how samples are grouped, but their averages are a property of the recipe (lengths, mix,
+        batcher); the orchestrator measures those averages once on representative batches when setting it up.
         """
         tokens_per_sec = int(self.total_batch_size / dt) if dt > 0 else 0
         flops_so_far = self.num_flops_per_token * self.total_batch_size * step
@@ -606,8 +597,8 @@ class Trainer:
         This method can be overridden in subclasses for custom training logic.
 
         Args:
-            data_iter: Iterator over dataloader (must be infinite)
-            step: Current training step (for debug logging)
+            data_iter: Iterator over the dataloader (StopIteration propagates if it runs out)
+            step: Current training step (named in the gradient-clipping error)
 
         Returns:
             tuple: (loss_accum, grad_norm, dataloader_state)
@@ -618,10 +609,6 @@ class Trainer:
         for micro_step in range(self.grad_accum_steps):
             # Get batch (will raise StopIteration if dataloader is exhausted)
             batch = next(data_iter)
-
-            # Debug: print first batch text (only on first micro-step) (disabled)
-            # if micro_step == 0:
-            #     self._debug_print_batch_text(step, batch)
 
             # Track dataloader state from last batch
             last_dataloader_state = batch.get('state_dict')
@@ -642,8 +629,8 @@ class Trainer:
             with sync_gradients(self.ddp, enabled=(micro_step == self.grad_accum_steps - 1)):
                 loss.backward()
 
-        # Clip gradients on the system's raw registered params (shared with the
-        # compiled trunk, so backward populated their .grad). Aborts here, before
+        # Clip gradients on the system's registered params (the trunk is compiled in
+        # place, if at all, so backward populated their .grad). Aborts here, before
         # the clip touches anything, if the norm is non-finite.
         grad_norm = clip_gradients(self.system, self.max_grad_norm, step,
                                    self.abort_on_nonfinite)
@@ -656,96 +643,6 @@ class Trainer:
         self.system.zero_grad(set_to_none=True)
 
         return loss_accum, grad_norm, last_dataloader_state
-
-    def _debug_print_batch_text(self, step, batch):
-        """
-        Debug helper: Print decoded text from first batch at each step.
-
-        Only prints if:
-        - step >= 10
-        - debug_tokenizer was provided
-        - this is the master process
-
-        Args:
-            step: Current training step
-            batch: Batch dict with 'idx' key containing token IDs
-        """
-        if step < 10 or not self.debug_tokenizer or not self.master_process:
-            return
-
-        # Get first sequence from batch [B, T] -> [T]
-        tokens = batch['idx'][0].cpu().tolist()
-
-        # Decode first 50 tokens to avoid too much output
-        tokens_to_decode = tokens[:50]
-        text = self.debug_tokenizer.decode(tokens_to_decode)
-
-        print0(f"\n[DEBUG] Step {step:05d} first text:")
-        print0(f"  Tokens: {tokens_to_decode}")
-        print0(f"  Text: {repr(text)}\n")
-
-    def _debug_print_gpu_memory(self, step):
-        """
-        Debug helper: Print GPU memory summary.
-
-        Only prints if this is the master process.
-
-        Args:
-            step: Current training step
-        """
-        if not self.master_process:
-            return
-
-        print0("\n" + "="*80)
-        print0(f"GPU Memory Summary at Step {step}")
-        print0("="*80)
-        print0(torch.cuda.memory_summary(abbreviated=False))
-        print0("="*80 + "\n")
-
-    def _debug_print_optimizer_state(self, step):
-        """
-        Debug helper: Print optimizer internal state.
-
-        Prints optimizer step counter and momentum/variance statistics.
-        Only prints if this is the master process.
-
-        Args:
-            step: Current training step
-        """
-        if not self.master_process:
-            return
-
-        print0(f"\n[DEBUG OPTIMIZER] Step {step:05d}")
-
-        for opt_idx, opt in enumerate(self.optimizers):
-            opt_state = opt.state_dict()
-            print0(f"  Optimizer {opt_idx}:")
-
-            # Print per-parameter-group info
-            for pg_idx, param_group in enumerate(opt.param_groups):
-                print0(f"    ParamGroup {pg_idx}: lr={param_group['lr']:.6e}")
-
-            # Print state for first parameter (to check momentum/variance)
-            if 'state' in opt_state and len(opt_state['state']) > 0:
-                # Get first parameter's state
-                first_param_id = list(opt_state['state'].keys())[0]
-                first_state = opt_state['state'][first_param_id]
-
-                print0(f"    First param state (id={first_param_id}):")
-                if 'step' in first_state:
-                    print0(f"      step: {first_state['step']}")
-                if 'exp_avg' in first_state:
-                    exp_avg = first_state['exp_avg']
-                    if hasattr(exp_avg, 'abs'):
-                        print0(f"      exp_avg (momentum) mean: {exp_avg.abs().mean().item():.6e}")
-                if 'exp_avg_sq' in first_state:
-                    exp_avg_sq = first_state['exp_avg_sq']
-                    if hasattr(exp_avg_sq, 'abs'):
-                        print0(f"      exp_avg_sq (variance) mean: {exp_avg_sq.abs().mean().item():.6e}")
-            else:
-                print0(f"    No state (optimizer not stepped yet)")
-
-        print0("")  # Empty line for readability
 
     def _evaluate(self, step, force=False):
         """
@@ -829,7 +726,7 @@ class Trainer:
 
     def _effective_initial_lr(self):
         """Read effective base LRs from the optimizer groups after resume handling."""
-        return {f"optimizer[{i}].param_groups[{j}]": g.get('initial_lr', g['lr'])
+        return {f"optimizer[{i}].param_groups[{j}]": g['initial_lr']
                 for i, opt in enumerate(self.optimizers) for j, g in enumerate(opt.param_groups)}
 
     def _print_training_info(self):
@@ -847,11 +744,7 @@ class Trainer:
         print0(f"Learning rate schedule:")
         print0("  initial_lr (effective, per param group): " + ", ".join(
             f"{name}={v:.6g}" for name, v in self._effective_initial_lr().items()))
-        print0(f"  scheduler: {self.scheduler_config.get('type', 'linear')}")
-        print0(f"  warmup_steps: {self.scheduler_config.get('warmup_steps', 0)}")
-        if self.scheduler_config.get('type', 'linear') == 'linear':
-            print0(f"  warmdown_ratio: {self.scheduler_config.get('warmdown_ratio', 0.2)}")
-        print0(f"  final_lr_frac: {self.scheduler_config.get('final_lr_frac', 0.0)}")
+        print0(f"  schedule: {self.lr_schedule}")
         print0(f"Performance:")
         print0(f"  GPU type: {self.gpu_type}")
         promised = (f"{self.promised_flops_per_sec:e}" if self.promised_flops_per_sec

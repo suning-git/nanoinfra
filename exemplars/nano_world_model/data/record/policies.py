@@ -10,7 +10,7 @@ Two policy shapes coexist:
     gaze -> pan/leg away -> silent dwell -> return -> re-gaze). This is the
     upgrade the corpus exists for: v2's cons5 panned blindly, so "entity seen ->
     look away -> look back -> entity still there" was rare; here it is scripted
-    AGAINST A TRACKED ENTITY and bookkept per event (docs/DESIGN_DATA_v3.md §4).
+    AGAINST A TRACKED ENTITY and bookkept per event.
 
 Turn calibration is inherited from the frozen line: a held turn key sweeps
 1.76 deg/tic for 5 tics then 3.52 deg/tic (SLOWTURNTICS, measured 2026-07-21).

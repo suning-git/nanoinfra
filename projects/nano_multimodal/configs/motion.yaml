@@ -47,7 +47,6 @@ optimizer:
   lr_max: 3.0e-4
 
 data:
-  sequence_len: ${sequence_len}
   # 3. HOW THE ROW IS LAID OUT.
   recipes:
     t2m:
@@ -55,8 +54,9 @@ data:
                  motion_start, motion_tokens, motion_end, eos]
       # 4. WHICH POSITIONS CARRY LOSS. The motion half only — the model is not being
       #    taught to write captions, and supervising them would spend capacity on it.
-      #    Same mechanism as the video line's: the source writes loss_weights, the
-      #    loader turns weight-0 positions into IGNORE_INDEX, fused CE skips them.
+      #    Same mechanism as the video line's: the source marks these positions in its
+      #    supervision_mask, the loader turns the others into IGNORE_INDEX targets, fused
+      #    CE skips them.
       supervise: [motion_start, motion_tokens, motion_end, eos]
   sources:
     # 2. WHERE THE DATA COMES FROM. Pre-encoded (caption, codes) pairs — the codec

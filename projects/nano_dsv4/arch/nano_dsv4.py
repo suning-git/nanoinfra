@@ -2,7 +2,7 @@
 deepseek-ai/DeepSeek-V4-Flash (transformers `deepseek_v4`), on the nanoinfra
 trunk seam.
 
-What is kept from the original (see docs/deepseek_v4.md for the delta list):
+What is kept from the original:
   - Shared-KV MQA: ONE kv head, K and V are the same tensor; low-rank Q with
     unweighted per-head RMSNorm; partial interleaved RoPE on the trailing
     slice; per-head learnable attention sink; INVERSE rope on the attention
@@ -388,6 +388,9 @@ class NanoDSV4(nn.Module):
             nn.init.normal_(block.mlp.gate.weight, mean=0.0, std=0.02)
             if hasattr(block.mlp.gate, "e_score_correction_bias"):
                 nn.init.zeros_(block.mlp.gate.e_score_correction_bias)
+                # to_empty left it uninitialized, and as a non-persistent buffer no checkpoint restores it: the
+                # first step_routers would otherwise read whatever was in that memory
+                nn.init.zeros_(block.mlp.gate._load_accum)
             if hasattr(block.mlp.gate, "tid2eid"):
                 block.mlp.gate.init_table(generator=gen)
             nn.init.zeros_(block.mlp.shared_experts.down_proj.weight)
@@ -404,9 +407,6 @@ class NanoDSV4(nn.Module):
                                                    device=self.get_device())
             setattr(self, f"cos_{kind}", cos)
             setattr(self, f"sin_{kind}", sin)
-        if self.wte.weight.device.type == "cuda":
-            self.wte.to(dtype=torch.bfloat16)
-            self.type_emb.to(dtype=torch.bfloat16)
 
     def estimate_flops(self):
         c = self.config
@@ -424,8 +424,10 @@ class NanoDSV4(nn.Module):
         aux, self._aux_loss = self._aux_loss, None
         return aux
 
-    def forward(self, idx, token_types=None, kv_cache=None, block_mask=None):
-        assert kv_cache is None and block_mask is None, "NanoDSV4 is training-only"
+    def forward(self, idx, token_types=None, kv_cache=None, *, attention="causal"):
+        if kv_cache is not None or not (isinstance(attention, str) and attention == "causal"):
+            raise ValueError(f"NanoDSV4 is training-only, with causal attention: got kv_cache={kv_cache!r}, "
+                             f"attention={attention!r}")
         B, T = idx.shape
         c = self.config
         x = self.wte(idx)

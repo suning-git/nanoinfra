@@ -78,7 +78,7 @@ def run_episode(writer, rng, recipe, ep, seed, layer_name, world, n_frames,
     def wall_probe():
         """(near, far): solid geometry within 48 / within 120 units of the
         facing ray. far gates dwells; near gates forward motion (a FWD ram is
-        the same full-screen wall stall, small-batch audit #2)."""
+        the same full-screen wall stall, seen in a small-batch audit)."""
         if wmask is None:
             return False, False
         px, py, ang = game.pose()
@@ -97,7 +97,7 @@ def run_episode(writer, rng, recipe, ep, seed, layer_name, world, n_frames,
             a = recovery.pop(0)
         else:
             near, far = wall_probe()
-            # Displacement-truth blocked detector (audit #4: 77% of wall
+            # Displacement-truth blocked detector (an audit found 77% of wall
             # stalls were FWD rams the mask cannot see — 45-unit cells
             # straddling a wall face read walkable). Held forward + no motion
             # for 3 tics = blocked, no mask involved.

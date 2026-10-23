@@ -1,7 +1,7 @@
 """
 motion — the motion content modality.
 
-A self-sufficient modality package (R6, 2026-07-07):
+A self-sufficient modality package (2026-07-07):
   - tokenizers/  the classic-tokenizer shelf (codec networks + MotionCodec
                  loader + REGISTRY.md of trained artifacts w/ birth certificates)
   - data/        the reusable data leg (SMPL/BVH<->rot139 converters, FK,
@@ -10,7 +10,7 @@ A self-sufficient modality package (R6, 2026-07-07):
 
 Research lines USE these as a user (import to load/encode/benchmark); they
 promote MATURE work back in as a developer, but do day-to-day research on
-COPIES in their own project (DESIGN §1). FakeMotionCodec stays for CPU-only
+COPIES in their own project. FakeMotionCodec stays for CPU-only
 tests (no checkpoint / no torch weights needed to exercise a third band).
 """
 
@@ -25,7 +25,7 @@ from modalities.motion.tokenizers import (
     save_checkpoint,
 )
 
-TYPE_ID = 1  # canonical (0=text, 1=motion, 2=control); see D1.2
+TYPE_ID = 1  # canonical (0=text, 1=motion, 2=control), the same in every modality
 
 
 class FakeMotionCodec:

@@ -17,7 +17,7 @@ import modalities.text
 from modalities.text import get_tokenizer
 from modalities.text.datasets import resolve_split
 from modalities.text.fineweb import token_data_loader
-from modalities.text.streams import make_loader_factory, resolve_sources
+from modalities.text.streams import make_loader_factory, make_text_loader, resolve_sources
 from modalities.text.train_text import SOURCE_TYPES, assemble_vocab
 from core.data.mixed_dataloader import MixedDataLoader
 
@@ -70,10 +70,10 @@ def test_train_and_eval_structure_signatures_match(env):
     """THE regression guard: same control-token structure on both sides."""
     cfg, toks, tok = env
     data_cfg = cfg["data"]
-    srcs = resolve_sources(data_cfg, 512, device="cuda" if torch.cuda.is_available() else "cpu")
-    train_batch = next(iter(MixedDataLoader(
-        {"batch_size": 4, "data": {"sequence_len": 512, "sources": srcs}},
-        toks, SOURCE_TYPES, None)))
+    srcs = resolve_sources(data_cfg, 512, device="cpu")
+    train_batch = next(iter(make_text_loader(
+        {"data": {"sources": srcs}}, toks, SOURCE_TYPES, batch_size=4, sequence_len=512,
+        device="cuda" if torch.cuda.is_available() else "cpu")))
 
     factory = make_loader_factory(data_cfg, toks, SOURCE_TYPES,
                                   device="cuda" if torch.cuda.is_available() else "cpu")
@@ -82,6 +82,16 @@ def test_train_and_eval_structure_signatures_match(env):
                              recipe_name="text_pretrain", B=4, T=512))
 
     assert _control_ids(train_batch["idx"], tok) == _control_ids(val_batch["idx"], tok)
+    # sequence_len is the row, T = 512 positions, for training and evaluation alike; a window is T + 1 tokens
+    assert srcs[0]["sample_len"] == 513
+    assert train_batch["idx"].shape == val_batch["idx"].shape == (4, 512)
+
+
+def test_a_source_declaring_the_old_length_key_is_refused(env):
+    cfg, _, _ = env
+    data_cfg = {**cfg["data"], "sources": [{**cfg["data"]["sources"][0], "sequence_len": 512}]}
+    with pytest.raises(KeyError, match="sample_len"):
+        resolve_sources(data_cfg, 512, device="cpu")
 
 
 def test_raw_bridge_really_is_the_old_ruler(env):
@@ -91,7 +101,7 @@ def test_raw_bridge_really_is_the_old_ruler(env):
     stopped being a bridge and the two series are no longer distinguishable.
     """
     cfg, _, tok = env
-    raw = next(token_data_loader(B=4, T=512,
+    raw = next(token_data_loader(B=4, T=512, device="cpu",
                                  files=resolve_split(cfg["data"], "fineweb", "val")))
     assert _control_ids(raw["idx"], tok) == [tok.encode_special("<|bos|>")]
 

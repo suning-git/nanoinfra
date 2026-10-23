@@ -3,7 +3,7 @@ train_wm — the Orchestrator: assemble a discrete video world model, then train
 
 This is the whole assembly, in one readable file, in the order it happens:
 
-    vocab  ->  row layout  ->  model  ->  data  ->  objective  ->  evaluator  ->  Trainer
+    vocab  ->  row layout  ->  model  ->  data  ->  evaluator  ->  Trainer
 
 Read it top to bottom and you know what this run is. Nothing is discovered, nothing
 is registered, nothing is injected: components are imported and wired here, which is
@@ -18,9 +18,15 @@ that drive them. Frame 0 is given; the other 4 latent frames are predicted by ma
 learns "given what I have seen and the buttons pressed, what does the world look
 like next", which is what makes it a world model rather than a video generator.
 
+THE DATA PATH is core's (core/data/), one part per job:
+
+    ClipSource            one raw clip at a time: its assembled row, which clip it is (dataset.py)
+    TwoStreamPreparation  that clip, noised: [clean | noisy], targets, weights, fields (block_diffusion.py)
+    PaddingBatcher        one clip per row, [device_batch_size, 2 x row_len]
+    MixedDataLoader       wires them, moves each batch to the GPU, keeps the data snapshot
+
 Usage:
     python -m exemplars.nano_world_model.train_wm
-    python -m exemplars.nano_world_model.train_wm max_steps=400 compile_trunk=false   # (max_steps must exceed warmup_steps=300)
     torchrun --nproc_per_node=2 --standalone \
         -m exemplars.nano_world_model.train_wm parallel=ddp
 
@@ -28,7 +34,10 @@ Config: configs/train_wm.yaml (co-located; inherits mechanism defaults from
 core/configs/train_base.yaml).
 """
 
+from functools import partial
+
 import hydra
+import torch
 from omegaconf import DictConfig, OmegaConf
 
 from exemplars.nano_world_model import spec
@@ -40,24 +49,25 @@ import modalities.text                                             # noqa: E402
 from modalities.assembler import Modality, build_layout            # noqa: E402
 from modalities.control import make_control_resolver               # noqa: E402
 
+from core.data.batchers import PaddingBatcher                      # noqa: E402
+from core.data.mixed_dataloader import MixedDataLoader             # noqa: E402
 from core.model.gpt import GPT, GPTConfig                          # noqa: E402
-from core.training.trainer import Trainer, create_optimizers        # noqa: E402
-from core.utils import print0                                      # noqa: E402
+from core.model.masks import default_mask_builder                  # noqa: E402
+from core.training.optim import build_optimizers                   # noqa: E402
+from core.training.trainer import Trainer                          # noqa: E402
+from core.utils import print0, set_torch_global_defaults           # noqa: E402
 
 from core.parallel import NanoDDP, block_buckets                   # noqa: E402
 from core.training.model_setup import (                            # noqa: E402
     build_system, compile_blocks)
 
 from exemplars.nano_world_model import row_layout             # noqa: E402
-from exemplars.nano_world_model.autoregressive import (       # noqa: E402
-    Autoregressive, AutoregressiveSystem)
 from exemplars.nano_world_model.block_diffusion import (      # noqa: E402
-    BlockDiffusion, BlockDiffusionSystem)
+    BlockDiffusionSystem, TwoStreamPreparation, pad_values)
 from exemplars.nano_world_model.rope3d import install_rope3d  # noqa: E402
 from exemplars.nano_world_model.dataset import (              # noqa: E402
-    VideoRowDataset, VideoRowLoader)
-from exemplars.nano_world_model.evaluator import (            # noqa: E402
-    NELBOEvaluator, NLLEvaluator)
+    ClipSource, VideoRowDataset)
+from exemplars.nano_world_model.evaluator import NELBOEvaluator  # noqa: E402
 
 
 def assemble_vocab():
@@ -103,30 +113,35 @@ def build_row_layout(layout, resolver, contract):
     )
 
 
+def batch_pad_values(layout, resolver):
+    """Pad values for the prepared samples: eos, and eos's token type."""
+    eos = resolver.resolve("eos")
+    return pad_values(eos, int(layout.classify_token_types(torch.tensor([eos]))[0]))
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="train_wm")
 def main(cfg: DictConfig) -> None:
+    # Process-wide PyTorch settings (CUDA allocator, TF32) are the entry's to make, before anything uses CUDA.
+    set_torch_global_defaults()
     config = OmegaConf.to_container(cfg, resolve=True)
-    obj_name = config["objective"]
-    assert obj_name in ("diffusion", "ar"), f"objective must be diffusion or ar, got {obj_name!r}"
     print0("=" * 80)
-    print0(f"train_wm — discrete video world model ({obj_name}) on core")
+    print0("train_wm — discrete video world model (block diffusion) on core")
     print0("=" * 80)
 
     # --- vocabulary + shape contract -----------------------------------------
     layout, resolver = assemble_vocab()
     contract = spec.shape_contract(config["clip"]["frames"], config["clip"]["res"])
     rows = build_row_layout(layout, resolver, contract)
-    row_layout.use_compiled_flex_attention()
+    mask_id = resolver.resolve(spec.MASK_SLOT)
     print0(f"\nvocab: ranges={dict(layout.ranges)} -> {layout.vocab_size} ids, "
            f"{layout.n_token_types} token types")
     print0(f"clip:  {contract}")
     print0(f"row:   {rows}")
 
-    # Block diffusion feeds the model BOTH streams — [clean | noisy] — so its sequence
-    # is twice the row; autoregression reads one row causally. Everything downstream
-    # (rope table, MFU, tokens/s) is sized from this, so throughput counts positions
-    # truly computed rather than positions nominally present.
-    sequence_len = 2 * rows.row_len if obj_name == "diffusion" else rows.row_len
+    # The model reads BOTH streams — [clean | noisy] — so its sequence is twice the row.
+    # Everything downstream (the batch shape, MFU, tokens/s) is sized from this, so
+    # throughput counts positions truly computed rather than positions nominally present.
+    sequence_len = 2 * rows.row_len
     config["sequence_len"] = sequence_len
     config["total_batch_size"] = config["total_batch_rows"] * sequence_len
 
@@ -141,13 +156,12 @@ def main(cfg: DictConfig) -> None:
         n_embd=model_config["dim"],
         n_token_types=layout.n_token_types,
     )
-    # Diffusion weights loss_per_token by 1/t and uses compiled CE to reduce peak
-    # memory. Liger cannot provide that weighted backward. AR uses mean-reduced
-    # loss and keeps liger for its lower peak memory in both training and CE eval.
-    head_ce = "compiled" if obj_name == "diffusion" else "liger"
+    # head_ce="compiled": the loss weights each masked cell (block_diffusion.py), a backward liger cannot give.
+    # param_dtype: what parameters, gradients and AdamW moments are stored in (train_base.yaml).
     setup = build_system(GPT, gpt_config,     # trunk compiled per block below
-                         head_ce=head_ce,
-                         seed=config["seed"], parallel=config["parallel"])
+                         head_ce="compiled",
+                         seed=config["seed"], parallel=config["parallel"],
+                         param_dtype={"bf16": torch.bfloat16, "fp32": torch.float32}[config["param_dtype"]])
     base, rank, world_size = setup["system"], setup["rank"], setup["world_size"]
     device = setup["device"]
 
@@ -155,26 +169,16 @@ def main(cfg: DictConfig) -> None:
     # other than next-token CE (core/model/system.py: "write your own System
     # satisfying the same loss(batch) contract — core does not change"). Consequence:
     # core's Trainer runs this unmodified and this project has no Trainer subclass.
-    if obj_name == "diffusion":
-        objective = BlockDiffusion(rows, layout, mask_id=resolver.resolve(spec.MASK_SLOT),
-                                   t_min=config["diffusion"]["t_min"],
-                                   t_max=config["diffusion"]["t_max"], device=device)
-        system = BlockDiffusionSystem(base.trunk, base.head, objective)
-    else:
-        objective = Autoregressive(rows)
-        system = AutoregressiveSystem(base.trunk, base.head, objective)
+    d = config["diffusion"]
+    system = BlockDiffusionSystem(base.trunk, base.head, rows, d["t_min"], d["t_max"],
+                                  mask_builder=default_mask_builder(device))
     system.arch = base.arch          # assembly fact for checkpoint self-description
 
-    # Position encoding, in two moves. First the 3D tables — every objective
-    # trains on (t, y, x) coordinates (rope3d.py; a checkpoint load does not
-    # touch them, the buffers are non-persistent). Then, for diffusion only,
-    # the mirror: it makes the noisy copy of a position carry the SAME rotary
-    # phase as its clean twin. An autoregressive row has no twin.
-    # Both swapped BEFORE compile so the compiled blocks see the final tables;
-    # the swap itself is a trunk attribute, outside the block graphs.
+    # Position encoding: the 3D table (rope3d.py) — a checkpoint load does not touch it,
+    # the buffers are non-persistent. Installed BEFORE compile, so the compiled blocks
+    # see the final table; the table itself is a trunk attribute, outside the block graphs.
+    # The flex attention call trains only compiled: core's trunk refuses it otherwise.
     install_rope3d(system.trunk, rows)
-    if obj_name == "diffusion":
-        rows.install_mirror_rope(system.trunk)
     if config.get("compile_trunk", True):
         compile_blocks(system.trunk)
 
@@ -185,9 +189,16 @@ def main(cfg: DictConfig) -> None:
     assert train_set.contract == contract, (
         f"cache contract {train_set.contract} != run contract {contract} — rebuild the "
         f"cache with build_cache.py for this clip length")
-    dataloader = VideoRowLoader(train_set, rows, config["device_batch_size"],
-                                seed=config["seed"], device=device)
-    print0(f"\ndata:  {train_set}\n       {val_set}\n       {dataloader}")
+    pads = batch_pad_values(layout, resolver)
+    source = ClipSource(train_set, rows, seed=config["seed"])
+    dataloader = MixedDataLoader(
+        {"clips": (source, 1.0)},
+        build_supervised_sample_fn=TwoStreamPreparation(rows, layout, mask_id, d["t_min"], d["t_max"],
+                                                        seed=config["seed"]),
+        create_batcher_fn=partial(PaddingBatcher, shape=(config["device_batch_size"], sequence_len),
+                                  pad_values=pads),
+        device=device)
+    print0(f"\ndata:  {train_set}\n       {val_set}\n       {source}")
 
     # --- the ruler -------------------------------------------------------------
     # `evaluation.enabled=false` builds no evaluators at all, which is what the
@@ -198,21 +209,15 @@ def main(cfg: DictConfig) -> None:
     if not config["evaluation"].get("enabled", True):
         evaluators = []
         print0("eval:  disabled (evaluation.enabled=false)")
-    elif obj_name == "diffusion":
-        evaluators = [NELBOEvaluator(
-            objective, val_set, rows, n_rows=config["evaluation"]["val_rows"],
-            t_grid=config["evaluation"]["t_grid"], batch=config["evaluation"]["batch"],
-            interval_steps=config["evaluation"]["interval_steps"], device=device)]
     else:
-        evaluators = [NLLEvaluator(
-            objective, val_set, rows, n_rows=config["evaluation"]["val_rows"],
-            batch=config["evaluation"]["batch"],
-            interval_steps=config["evaluation"]["interval_steps"], device=device)]
-    if evaluators:
+        ev = config["evaluation"]
+        evaluators = [NELBOEvaluator(val_set, rows, layout, mask_id, pads, n_rows=ev["val_rows"],
+                                     t_grid=ev["t_grid"], batch=ev["batch"],
+                                     interval_steps=ev["interval_steps"], device=device)]
         print0(f"eval:  {evaluators[0].describe()}")
 
     # --- gradient synchronization (explicit; the Trainer calls it in the step) --
-    optimizers = create_optimizers(system, config["optimizer"], world_size=world_size)
+    optimizers = build_optimizers(system, config["optimizer"])
     ddp = None
     if world_size > 1:
         assert config["parallel"] == "ddp", (

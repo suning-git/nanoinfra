@@ -28,10 +28,21 @@ tokenizer: rot139_kin_fsq2
 codec_ckpt: null
 
 # ----------------------------------------------------------------------------
-# The sequence. 256 codes x 4 frames/code = ~34 seconds of motion at 30fps, minus
-# the caption and the delimiters.
+# The sequence. sequence_len is T, the positions per row, for the Trainer, the GPT and
+# the batcher; a source sample is at most T + 1 raw tokens (the next-token shift).
+# 256 codes x 4 frames/code = ~34 seconds of motion at 30fps, minus the caption and
+# the delimiters.
 # ----------------------------------------------------------------------------
 sequence_len: 256
+sample_len: null    # raw tokens per source sample: the MotionDataSource window, the T2M upper bound;
+                    #   null = sequence_len + 1. A run trained before 2026-10 with sequence_len 256 had rows
+                    #   of 255, stored in bf16, so continuing it takes param_dtype=bf16 in either case (or
+                    #   checkpoint.allow_param_dtype_change=true to convert it to fp32). On its own cut:
+                    #   sequence_len=255, total_batch_size=4080 (16 rows x 255 positions here; pin max_steps if
+                    #   it was automatic). Continuing on rows of 256 also works: T2M resumes as it is (its pair
+                    #   count does not depend on the length); MotionDataSource needs sample_len=256, that run's
+                    #   window (its window count does).
+batching: padding   # padding = one sample per row | packing = whole samples back to back (core's PackingBatcher)
 device_batch_size: 16
 total_batch_size: 4096
 seed: 42
@@ -46,8 +57,8 @@ recipe:
   t2m:
     template: [bos, text_start, text_tokens, text_end,
                motion_start, motion_tokens, motion_end, eos]
-    supervise: tags
-    supervise_tags: [motion_tokens, motion_end]
+    supervise: [motion_tokens, motion_end]   # segment names (SequenceRecipe level 2); the former `supervise: tags`
+                                             # + a 2-entry supervise_tags was refused by the recipe (length != 8)
   motion:
     template: [bos, motion_start, motion_tokens, motion_end, eos]
     supervise: all

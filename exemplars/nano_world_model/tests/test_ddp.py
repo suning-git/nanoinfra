@@ -17,9 +17,9 @@ CHECK 2 — data-parallel math.
     Two ranks each holding half the batch must produce the same gradient as one rank
     doing both halves with gradient accumulation. The two configurations are made
     comparable in the one way that IS under our control: both consume the SAME two
-    micro-batches, and the diffusion noise is seeded from the rows in a micro-batch
-    rather than from the step or the rank (see dataset.py), so identical
-    micro-batches get identical masks.
+    micro-batches, and a clip's noise is drawn when it is prepared, from a seed of the
+    clip itself rather than of the step or the rank (block_diffusion.py), so identical
+    micro-batches carry identical masks.
 
     This check is written with a tolerance rather than as an equality, because in
     general it must be: floating-point addition is not associative, and the paths
@@ -32,9 +32,9 @@ CHECK 2 — data-parallel math.
     magnitudes and therefore round identically. Do not carry the expectation to
     world size 3 — the tolerance is the real contract.
 
-Both checks use the real row layout, the real objective, and real cache rows — a
-synthetic model would not exercise the head's compiled cross-entropy, which is where
-a per-token weight can silently go missing.
+Both checks use the real row layout, the real objective, and real cache rows, prepared
+and collated by core's pipeline parts — a synthetic model would not exercise the head's
+compiled cross-entropy, which is where a per-token weight can silently go missing.
 """
 
 import os
@@ -47,14 +47,17 @@ from exemplars.nano_world_model.rope3d import install_rope3d
 
 spec.pin_tokenizer()
 
+from core.data.layout import collate_samples, padding_layout      # noqa: E402
 from core.model.gpt import GPT, GPTConfig                          # noqa: E402
+from core.model.masks import default_mask_builder                  # noqa: E402
 
 from core.parallel import (                                        # noqa: E402
     NanoDDP, block_buckets, sync_gradients)
 from core.training.model_setup import (                            # noqa: E402
     build_system, compile_blocks)
-from exemplars.nano_world_model import row_layout, train_wm   # noqa: E402
-from exemplars.nano_world_model.block_diffusion import BlockDiffusion  # noqa: E402
+from exemplars.nano_world_model import train_wm              # noqa: E402
+from exemplars.nano_world_model.block_diffusion import (      # noqa: E402
+    BlockDiffusionSystem, TwoStreamPreparation)
 from exemplars.nano_world_model.dataset import VideoRowDataset  # noqa: E402
 
 FRAMES, RES = 17, 128
@@ -97,33 +100,38 @@ def main():
     layout, resolver = train_wm.assemble_vocab()
     contract = spec.shape_contract(FRAMES, RES)
     rows = train_wm.build_row_layout(layout, resolver, contract)
-    row_layout.use_compiled_flex_attention()
 
     cfg = GPTConfig(sequence_len=2 * rows.row_len, vocab_size=layout.vocab_size,
                     n_layer=DEPTH, n_head=HEADS, n_kv_head=HEADS, n_embd=DIM,
                     n_token_types=layout.n_token_types)
     setup = build_system(GPT, cfg, seed=0, parallel="ddp", head_ce="compiled")
-    system, device = setup["system"], setup["device"]
+    base, device = setup["system"], setup["device"]
+    system = BlockDiffusionSystem(base.trunk, base.head, rows, spec.T_MIN, spec.T_MAX,
+                                  mask_builder=default_mask_builder(device))
     install_rope3d(system.trunk, rows)
-    rows.install_mirror_rope(system.trunk)
     compile_blocks(system.trunk)     # the configuration we actually train in
 
-    objective = BlockDiffusion(rows, layout, resolver.resolve(spec.MASK_SLOT),
-                               spec.T_MIN, spec.T_MAX, device)
-
-    # Two fixed micro-batches from the frozen val split, one per rank. Both ranks
-    # build BOTH so rank-local code can compute the single-process reference.
+    # Two fixed micro-batches of val clips, prepared as the loader prepares training
+    # clips, one per rank. Both ranks build BOTH so rank-local code can compute the
+    # single-process reference.
     ds = VideoRowDataset(spec.cache_dir(FRAMES, RES), "val")
-    codes, actions = ds.take(2 * MICRO_ROWS)
-    micro = [(rows.assemble(codes[i * MICRO_ROWS:(i + 1) * MICRO_ROWS],
-                            actions[i * MICRO_ROWS:(i + 1) * MICRO_ROWS]).to(device),
-              1000 + i)                                    # (idx, noise_seed)
-             for i in range(2)]
+    sel = ds.spread(2 * MICRO_ROWS)
+    clips = rows.assemble(ds.codes[sel], ds.actions[sel])
+    prep = TwoStreamPreparation(rows, layout, resolver.resolve(spec.MASK_SLOT), spec.T_MIN, spec.T_MAX, seed=0)
+    pads = train_wm.batch_pad_values(layout, resolver)
+    shape = (MICRO_ROWS, 2 * rows.row_len)
+    micro = []
+    for i in range(2):
+        samples = [prep({"tokens": clips[j], "meta": {"row": int(sel[j]), "epoch": 0}})
+                   for j in range(i * MICRO_ROWS, (i + 1) * MICRO_ROWS)]
+        batch = collate_samples(samples, padding_layout([shape[1]] * MICRO_ROWS, shape), shape=shape,
+                                pad_values=pads)
+        micro.append({k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()})
 
     ddp = NanoDDP([list(system.head.parameters())] + block_buckets(system.trunk),
                   module=system)
     autocast = torch.autocast("cuda", torch.bfloat16)
-    my_idx, my_seed = micro[rank]
+    mine = micro[rank]
 
     if rank == 0:
         print(f"\nmodel d{DEPTH}/{DIM}, row {rows.row_len}, "
@@ -134,7 +142,7 @@ def main():
     system.zero_grad(set_to_none=True)
     with sync_gradients(ddp, enabled=True):
         with autocast:
-            objective.loss(system, my_idx, my_seed).backward()
+            system.loss(mine).backward()
     g_ddp = grads(system)
 
     # The bracket must be exactly the raw halves, or the tests below prove nothing
@@ -142,7 +150,7 @@ def main():
     system.zero_grad(set_to_none=True)
     ddp.reset(sync=True)
     with autocast:
-        objective.loss(system, my_idx, my_seed).backward()
+        system.loss(mine).backward()
     ddp.finalize()
     bad, _ = compare(g_ddp, grads(system))
     check("sync_gradients() == reset()/finalize(), bitwise", bad == 0)
@@ -151,7 +159,7 @@ def main():
     system.zero_grad(set_to_none=True)
     ddp.reset(sync=False)                        # hooks inert; no overlap, no buckets
     with autocast:
-        objective.loss(system, my_idx, my_seed).backward()
+        system.loss(mine).backward()
     for p in system.parameters():
         if p.grad is not None:
             dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
@@ -163,10 +171,10 @@ def main():
 
     # --- reference 2: one process, gradient accumulation over BOTH micro-batches --
     system.zero_grad(set_to_none=True)
-    for idx_m, seed_m in micro:
+    for batch_m in micro:
         ddp.reset(sync=False)                    # local only — this rank is "the" GPU
         with autocast:
-            (objective.loss(system, idx_m, seed_m) / 2).backward()
+            (system.loss(batch_m) / 2).backward()
     g_accum = grads(system)
 
     bad, worst = compare(g_ddp, g_accum)
@@ -192,7 +200,7 @@ def main():
     system.zero_grad(set_to_none=True)
     guard_ddp.reset(sync=True)
     with autocast:
-        objective.loss(system, my_idx, my_seed).backward()
+        system.loss(mine).backward()
     raised = False
     try:
         guard_ddp.finalize()
@@ -211,7 +219,7 @@ def main():
     system.zero_grad(set_to_none=True)
     loose.reset(sync=True)
     with autocast:
-        objective.loss(system, my_idx, my_seed).backward()
+        system.loss(mine).backward()
     caught = False
     try:
         loose.reset(sync=True)            # next step, without finalizing the last one

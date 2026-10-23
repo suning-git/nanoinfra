@@ -11,6 +11,16 @@ not) measure which frontier model is "better"; the honest outputs are (1) the
 architecture arithmetic — KV-cache size, parameter / FLOP accounting, true at any
 scale — and (2) a same-data, same-budget cross-entropy curve, for feel.
 
+> **Storage precision.** The curves here were measured with parameters, gradients and AdamW moments stored in bf16,
+> core's only storage then (code up to v0.2.0). `build_system` now stores them in fp32 by default. This architecture
+> reads some weights outside autocast's casts (`.float()`) and does not cast its embedding or rotary tables to bf16, so
+> fp32 storage changes its arithmetic too, not only what is stored. `scripts/train_nano.py --param-dtype bf16` stores
+> the parameters as before, but not the rest as before: since 0.3.0 `build_system` converts parameters only, so the
+> fp32 rotary tables and the router's fp32 bias are no longer rounded to bf16 (on one device or under NanoDDP the
+> attention reads the exact tables; FSDP still hands each block its tables in bf16). In either storage, the
+> router's load accumulator now starts at zero; before, it started with whatever the memory the model was built in
+> held, which the first router step read. To rerun the old curves on the code that made them, use v0.2.0.
+
 ## The three changes vs a vanilla GPT
 
 - **Residual stream → 4 parallel streams (mHC).** Manifold-Constrained

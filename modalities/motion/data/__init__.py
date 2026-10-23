@@ -1,5 +1,5 @@
 """
-motion.data — the reusable data leg (R6, 2026-07-07).
+motion.data — the reusable data leg (2026-07-07).
 
 SMPL/BVH <-> rot139 converters, differentiable FK, dataset loaders, windowing,
 and the core DataSources (MotionDataSource / T2MDataSource). Importing this

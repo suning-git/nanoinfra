@@ -86,7 +86,7 @@ def autoregressive_generate(
     """
     B, T = prompt_ids.size()
     trunk = system.trunk
-    rotary_len = trunk.cos.size(1)
+    rotary_len = trunk.rotary_table_len
     assert T + max_new_tokens <= rotary_len, \
         f"prompt {T} + max_new_tokens {max_new_tokens} exceeds rotary cache {rotary_len}"
 

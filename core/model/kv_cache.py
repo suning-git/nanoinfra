@@ -24,9 +24,9 @@ layer's insert. Buffers are allocated lazily from the first insert's dtype/devic
 (so the cache follows autocast) .
 
 Both caches keep their own valid length — the caller never hands it in. What a forward
-may SEE is not cache state either: it is that forward's `causal` argument
-(GPT.forward), so one cache serves causal writes and bidirectional block-diffusion
-passes in alternation. Both rewind, between complete forwards.
+may SEE is not cache state either: it is that forward's `attention` argument
+(GPT.forward: "causal" or "bidirectional"), so one cache serves causal writes and
+bidirectional block-diffusion passes in alternation. Both rewind, between complete forwards.
 """
 
 import operator
@@ -115,8 +115,8 @@ def _host_count(n, cache):
 
 
 def _bidir_is_gone(*_):
-    raise AttributeError("StaticKVCache.bidir was removed: pass causal=False (bidirectional "
-                         "chunk) or causal=True to the trunk forward instead")
+    raise AttributeError("StaticKVCache.bidir was removed: pass attention=\"bidirectional\" "
+                         "(bidirectional chunk) or attention=\"causal\" to the trunk forward instead")
 
 
 class StaticKVCache:
@@ -141,8 +141,9 @@ class StaticKVCache:
     change.
 
     The mask is causal, or "every query sees the whole prefix plus the current chunk,
-    bidirectionally" for a block-diffusion denoise step, as the forward's `causal`
-    argument says. Under CUDA graphs each value is its own recorded graph.
+    bidirectionally" for a block-diffusion denoise step, as the forward's `attention`
+    argument says ("causal" / "bidirectional"; the static cache takes no BlockMask).
+    Under CUDA graphs each value is its own recorded graph.
     """
 
     # Visibility used to be selected by setting this attribute. Code written for that

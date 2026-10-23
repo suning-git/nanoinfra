@@ -1,250 +1,75 @@
 """
-Evaluation service layer: stateless loss computation functions.
+Evaluation service layer: the loss evaluation of a System over a stream of batches.
 
-Two functions with identical interface, differing in how they compute loss:
-- evaluate_loss_logits: head(hidden) forward + F.cross_entropy (materializes logits)
-- evaluate_loss_fused: head.loss / head.type_losses (memory-safe)
+One path. Each batch goes through the System's own input preparation and trunk (the module training runs,
+compiled in place when the orchestrator compiled it), then `head.loss_per_token`, which follows the head's CE
+implementation (head_ce). What is reported is a set of metrics over that per-position CE, each a ratio of two
+sums: a function `metric(batch, ce) -> (numerator, denominator)` called once per batch, read as the sum of its
+numerators over every batch and every rank divided by the sum of its denominators. core's metrics (total CE,
+per-type CE, bits per byte) are in core/evaluation/metrics.py; a project writes its own the same way, e.g. a
+weighted objective or a per-group breakdown.
 """
 
-import math
-
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
 
-from core.tokenization.vocab_layout import VocabLayout
-
 
 @torch.no_grad()
-def evaluate_loss_logits(model, loader, steps, type_ids=None, token_bytes=None):
+def evaluate_loss(model, loader, steps, metrics):
     """
-    Evaluate loss via the head's forward (logits) + F.cross_entropy.
-
-    Materializes logits [B, T, V]. Supports per-token analysis.
+    Evaluate per-position CE metrics of a System over `steps` batches.
 
     Args:
-        model: System (model.trunk(idx) returns hidden; model.head(hidden) returns logits)
-        loader: Iterable yielding batch dicts with idx, targets, token_types, etc.
-        steps: Number of batches to evaluate
-        type_ids: Optional list of type IDs for per-type loss (requires target_types in batch)
-        token_bytes: Optional [vocab_size] tensor for BPB computation
+        model: System with prepare_trunk_inputs(batch) -> (idx, kwargs); model.trunk(idx, **kwargs) returns hidden;
+            model.head.loss_per_token(hidden, targets) returns the unreduced CE, 0 at IGNORE targets
+        loader: iterable yielding batch dicts. Each needs `targets` aligned position by position with the trunk's
+            output (whether they are shifted is the data's business), plus whatever the metrics read.
+        steps: number of batches, > 0. The SAME on every rank, and the loader must yield at least that many: every
+            rank runs the trunk and the head on every batch (under FSDP each forward is a collective), whether or
+            not its batch holds anything for a given metric.
+        metrics: {name: fn}, fn(batch, ce) -> (numerator, denominator), with ce the per-position CE shaped like
+            batch["targets"]. Each of the two is a Python number or a 0-dim tensor on ce's device; a batch with
+            nothing for the metric returns (0, 0). fn reads batch and ce only: no reduction across ranks, no state
+            across batches. Every rank builds the evaluator from the same code and config, so every rank holds the
+            same names with the same meaning; rows are laid out by sorted name.
 
     Returns:
-        dict: Always has "total_loss". Optionally "type_losses", "bpb".
+        {name: sum of numerators / sum of denominators} over every batch and rank, in the order of `metrics`;
+        inf where the global denominator is 0 (no data for that metric anywhere).
+
+    What this measures is the CE the batch's `targets` define, not `model.loss`: an auxiliary term, targets the
+    System builds itself, or another objective are not in it. Any average that splits into two sums fits (a mean of
+    batch means is (batch mean, 1) per batch); a median, or a non-linear function of a global value (perplexity is
+    exp of the global CE), does not, and the latter the caller computes from the result.
+
+    Precision: the per-position CE and each metric's sum over a batch are whatever the head and the metric compute;
+    only the running totals across batches are float64, one number per numerator and denominator.
     """
+    if steps <= 0:
+        raise ValueError(f"evaluate_loss: steps must be positive, got {steps}")
+    names = sorted(metrics)                   # one row per metric, by name: the same layout on every rank
     device = next(model.parameters()).device
-
-    total_loss_sum = torch.tensor(0.0, dtype=torch.float32, device=device)
-    total_count = torch.tensor(0, dtype=torch.int64, device=device)
-
-    has_types = type_ids is not None
-    if has_types:
-        type_loss_sums = [torch.tensor(0.0, dtype=torch.float32, device=device) for _ in type_ids]
-        type_counts = [torch.tensor(0, dtype=torch.int64, device=device) for _ in type_ids]
-
-    has_bpb = token_bytes is not None
-    if has_bpb:
-        total_nats = torch.tensor(0.0, dtype=torch.float32, device=device)
-        total_bytes = torch.tensor(0, dtype=torch.int64, device=device)
+    sums = torch.zeros(len(names), 2, dtype=torch.float64, device=device)
 
     batch_iter = iter(loader)
-    for _ in range(steps):
-        batch = next(batch_iter)
-
-        x = batch["idx"]
+    for i in range(steps):
+        try:
+            batch = next(batch_iter)
+        except StopIteration:
+            raise RuntimeError(f"evaluate_loss: the loader ran out after {i} of {steps} batches") from None
         y = batch["targets"]
-        token_types = batch.get("token_types")
+        # The System's prepare_trunk_inputs turns the batch into trunk arguments, the same translation training
+        # uses, and system.trunk is the same module training runs.
+        idx, trunk_kwargs = model.prepare_trunk_inputs(batch)
+        hidden = model.trunk(idx, **trunk_kwargs)
+        ce = model.head.loss_per_token(hidden, y).reshape(y.shape)
+        for row, name in enumerate(names):
+            num, den = metrics[name](batch, ce)
+            sums[row, 0].add_(num)            # a Python number goes in as a kernel scalar: no host-to-device copy
+            sums[row, 1].add_(den)
 
-        # Forward (trunk) + head logits
-        hidden = model.trunk(x, token_types=token_types)
-        logits = model.head(hidden)
-
-        # Per-token loss [B*T]
-        loss_flat = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)),
-            y.reshape(-1),
-            ignore_index=VocabLayout.IGNORE_INDEX,
-            reduction='none',
-        )
-        y_flat = y.reshape(-1)
-        valid = (y_flat >= 0)
-
-        # Total CE
-        total_loss_sum += loss_flat[valid].sum()
-        total_count += valid.sum()
-
-        # Per-type CE
-        if has_types:
-            if 'target_types' not in batch:
-                raise ValueError(
-                    "type_ids provided but batch missing 'target_types'."
-                )
-            tt_flat = batch['target_types'].reshape(-1)
-            for i, tid in enumerate(type_ids):
-                type_valid = valid & (tt_flat == tid)
-                type_loss_sums[i] += loss_flat[type_valid].sum()
-                type_counts[i] += type_valid.sum()
-
-        # BPB
-        if has_bpb:
-            y_safe = torch.where(valid, y_flat, torch.zeros_like(y_flat))
-            num_bytes = torch.where(
-                valid,
-                token_bytes[y_safe],
-                torch.zeros_like(y_flat, dtype=token_bytes.dtype),
-            )
-            bpb_valid = valid & (num_bytes > 0)
-            total_nats += loss_flat[bpb_valid].sum()
-            total_bytes += num_bytes[bpb_valid].sum()
-
-    # Distributed all_reduce
-    world_size = dist.get_world_size() if dist.is_initialized() else 1
-    if world_size > 1:
-        all_tensors = [total_loss_sum, total_count]
-        if has_types:
-            all_tensors.extend(type_loss_sums)
-            all_tensors.extend(type_counts)
-        if has_bpb:
-            all_tensors.extend([total_nats, total_bytes])
-        for t in all_tensors:
-            dist.all_reduce(t, op=dist.ReduceOp.SUM)
-
-    # Build results
-    results = {}
-    n = total_count.item()
-    results["total_loss"] = total_loss_sum.item() / n if n > 0 else float('inf')
-
-    if has_types:
-        type_losses = {}
-        for i, tid in enumerate(type_ids):
-            c = type_counts[i].item()
-            type_losses[tid] = type_loss_sums[i].item() / c if c > 0 else float('inf')
-        results["type_losses"] = type_losses
-
-    if has_bpb:
-        tb = total_bytes.item()
-        results["bpb"] = total_nats.item() / (math.log(2) * tb) if tb > 0 else float('inf')
-
-    return results
-
-
-@torch.no_grad()
-def evaluate_loss_fused(model, loader, steps, type_ids=None, token_bytes=None):
-    """
-    Evaluate loss via head_loss / head_type_losses (fused CE).
-
-    Memory-safe on the liger head, which never materializes the [B, T, V] logits
-    (the compiled head materializes the bf16 projection, naive the fp32 logits).
-
-    Args:
-        model: GPT model (forward returns hidden, has head_loss/head_type_losses)
-        loader: Iterable yielding batch dicts with idx, targets, token_types, etc.
-        steps: Number of batches to evaluate
-        type_ids: Optional list of type IDs for per-type loss (requires target_types in batch)
-        token_bytes: Optional [vocab_size] tensor for BPB computation
-
-    Returns:
-        dict: Always has "total_loss". Optionally "type_losses", "bpb".
-    """
-    device = next(model.parameters()).device
-
-    total_loss_sum = torch.tensor(0.0, dtype=torch.float32, device=device)
-    total_count = torch.tensor(0, dtype=torch.int64, device=device)
-
-    has_types = type_ids is not None
-    if has_types:
-        type_loss_sums = [torch.tensor(0.0, dtype=torch.float32, device=device) for _ in type_ids]
-        type_counts = [torch.tensor(0, dtype=torch.int64, device=device) for _ in type_ids]
-
-    has_bpb = token_bytes is not None
-    if has_bpb:
-        total_nats = torch.tensor(0.0, dtype=torch.float32, device=device)
-        total_bytes = torch.tensor(0, dtype=torch.int64, device=device)
-
-    batch_iter = iter(loader)
-    for _ in range(steps):
-        batch = next(batch_iter)
-
-        x = batch["idx"]
-        y = batch["targets"]
-        token_types = batch.get("token_types")
-
-        # Forward (trunk) + fused head loss
-        hidden = model.trunk(x, token_types=token_types)
-        loss = model.head.loss(hidden, y)
-
-        # Count valid tokens for this batch
-        y_flat = y.reshape(-1)
-        n_valid = (y_flat >= 0).sum()
-
-        total_loss_sum += loss * n_valid
-        total_count += n_valid
-
-        # Per-type losses
-        if has_types:
-            if 'target_types' not in batch:
-                raise ValueError(
-                    "type_ids provided but batch missing 'target_types'."
-                )
-            type_losses_batch = model.head.type_losses(hidden, y, batch['target_types'], type_ids)
-            tt_flat = batch['target_types'].reshape(-1)
-            for i, tid in enumerate(type_ids):
-                n_type = ((y_flat >= 0) & (tt_flat == tid)).sum()
-                type_loss_sums[i] += type_losses_batch[tid] * n_type
-                type_counts[i] += n_type
-
-        # BPB: nats over BYTE-BEARING targets only. `loss` averages over every valid
-        # target, zero-byte control tokens included, so it cannot be charged to the
-        # byte-bearing ones (public issue #6). Run the fused CE once more with the
-        # zero-byte targets masked to IGNORE: one extra head pass, still fused on Liger,
-        # and the mean over the masked set is exact on all arms. Unconditional on
-        # purpose: head.loss is an FSDP forward method, so every rank must issue it
-        # the same number of times regardless of its batch. A batch with no
-        # byte-bearing target gives nan (0/0): contribute 0 nats for THAT case only
-        # (torch.where on the count), so a real NaN/Inf on a non-empty set still
-        # propagates to bpb the way it does to total_loss.
-        if has_bpb:
-            valid = (y_flat >= 0)
-            y_safe = torch.where(valid, y_flat, torch.zeros_like(y_flat))
-            num_bytes = torch.where(
-                valid,
-                token_bytes[y_safe],
-                torch.zeros_like(y_flat, dtype=token_bytes.dtype),
-            )
-            bpb_valid = valid & (num_bytes > 0)
-            n_bpb = bpb_valid.sum()
-            y_bytes = torch.where(bpb_valid.reshape(y.shape), y,
-                                  torch.full_like(y, VocabLayout.IGNORE_INDEX))
-            bpb_loss = model.head.loss(hidden, y_bytes)
-            total_nats += torch.where(n_bpb > 0, bpb_loss * n_bpb, torch.zeros_like(bpb_loss))
-            total_bytes += num_bytes[bpb_valid].sum()
-
-    # Distributed all_reduce
-    world_size = dist.get_world_size() if dist.is_initialized() else 1
-    if world_size > 1:
-        all_tensors = [total_loss_sum, total_count]
-        if has_types:
-            all_tensors.extend(type_loss_sums)
-            all_tensors.extend(type_counts)
-        if has_bpb:
-            all_tensors.extend([total_nats, total_bytes])
-        for t in all_tensors:
-            dist.all_reduce(t, op=dist.ReduceOp.SUM)
-
-    # Build results
-    results = {}
-    n = total_count.item()
-    results["total_loss"] = total_loss_sum.item() / n if n > 0 else float('inf')
-
-    if has_types:
-        type_losses = {}
-        for i, tid in enumerate(type_ids):
-            c = type_counts[i].item()
-            type_losses[tid] = type_loss_sums[i].item() / c if c > 0 else float('inf')
-        results["type_losses"] = type_losses
-
-    if has_bpb:
-        tb = total_bytes.item()
-        results["bpb"] = total_nats.item() / (math.log(2) * tb) if tb > 0 else float('inf')
-
-    return results
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        dist.all_reduce(sums, op=dist.ReduceOp.SUM)
+    totals = dict(zip(names, sums.tolist()))
+    return {name: totals[name][0] / totals[name][1] if totals[name][1] != 0 else float("inf")
+            for name in metrics}

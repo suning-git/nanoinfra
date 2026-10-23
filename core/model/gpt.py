@@ -9,7 +9,7 @@ Notable features:
 - no learnable params in rmsnorm
 - no bias in linear layers
 - Group-Query Attention (GQA) support for more efficient inference
-- FlexAttention support for flexible attention patterns (reserved for future use)
+- FlexAttention for structured masks (a BlockMask as `attention`, e.g. packed samples kept apart)
 - Token type embeddings for optional typed-token conditioning
 """
 
@@ -23,13 +23,9 @@ import torch.nn.functional as F
 from core.model.kv_cache import STATIC
 
 # FlexAttention for flexible attention patterns (prefix-LM, document masking, etc.)
-try:
-    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
-    FLEX_ATTENTION_AVAILABLE = True
-except ImportError:
-    FLEX_ATTENTION_AVAILABLE = False
-    flex_attention = None
-    create_block_mask = None
+from torch.nn.attention.flex_attention import BlockMask, flex_attention
+
+_ATTENTION_NAMES = ("causal", "bidirectional")
 
 
 @dataclass
@@ -57,72 +53,6 @@ def apply_rotary_emb(x, cos, sin):
     out = torch.cat([y1, y2], 3) # re-assemble
     out = out.to(x.dtype) # ensure input/output dtypes match
     return out
-
-
-def create_flex_attention_mask(batch_size, seq_len, prefix_lengths, device):
-    """
-    Create a FlexAttention block mask for prefix-LM style attention.
-    Reserved for future use (e.g., block-wise causal attention).
-
-    Args:
-        batch_size: Batch size
-        seq_len: Sequence length (must be multiple of 128 for FlexAttention)
-        prefix_lengths: Tensor of shape [B] with prefix length for each sample.
-                       Tokens within prefix use full (bidirectional) attention.
-                       Tokens after prefix use causal attention but can attend to prefix.
-        device: Device to create the mask on
-
-    Returns:
-        BlockMask for use with flex_attention
-
-    Attention pattern visualization (prefix_length=3, seq_len=6):
-         kv: 0  1  2  3  4  5
-    q:     ┌──────────────────
-      0    │ 1  1  1  0  0  0   ← full attention (prefix)
-      1    │ 1  1  1  0  0  0   ← full attention (prefix)
-      2    │ 1  1  1  0  0  0   ← full attention (prefix)
-      3    │ 1  1  1  1  0  0   ← attend prefix + causal
-      4    │ 1  1  1  1  1  0   ← attend prefix + causal
-      5    │ 1  1  1  1  1  1   ← attend prefix + causal
-    """
-    if not FLEX_ATTENTION_AVAILABLE:
-        raise RuntimeError("FlexAttention not available. Requires PyTorch 2.5+")
-
-    def mask_mod(b, h, q_idx, kv_idx):
-        prefix_len = prefix_lengths[b]
-        # Within prefix: full bidirectional attention
-        q_in_prefix = q_idx < prefix_len
-        kv_in_prefix = kv_idx < prefix_len
-        # After prefix: causal attention, but can attend to prefix
-        causal = q_idx >= kv_idx
-        # Combine: if both in prefix -> full attention; otherwise -> causal + can see prefix
-        return (q_in_prefix & kv_in_prefix) | (kv_in_prefix) | causal
-
-    return create_block_mask(mask_mod, B=batch_size, H=None,
-                            Q_LEN=seq_len, KV_LEN=seq_len, device=device)
-
-
-def create_full_attention_mask(batch_size, seq_len, device):
-    """
-    Create a FlexAttention block mask for full bidirectional attention.
-    Reserved for future use (e.g., encoding motion inputs into embeddings).
-
-    Args:
-        batch_size: Batch size
-        seq_len: Sequence length
-        device: Device to create the mask on
-
-    Returns:
-        BlockMask for use with flex_attention
-    """
-    if not FLEX_ATTENTION_AVAILABLE:
-        raise RuntimeError("FlexAttention not available. Requires PyTorch 2.5+")
-
-    def mask_mod(b, h, q_idx, kv_idx):
-        return True  # All positions attend to all positions
-
-    return create_block_mask(mask_mod, B=batch_size, H=None,
-                            Q_LEN=seq_len, KV_LEN=seq_len, device=device)
 
 
 class CausalSelfAttention(nn.Module):
@@ -162,7 +92,7 @@ class CausalSelfAttention(nn.Module):
         #   block_mask set     structured training masks (block-causal, prefix-LM) | flex
         #                      the mask is huge but BLOCK-sparse; flex never
         #                      materializes it and skips dead tiles — its home turf.
-        #   causal=False       bidirectional chunk (block-diffusion denoise) | sdpa,
+        #   causal=False       attention="bidirectional": a chunk (block-diffusion denoise) | sdpa,
         #                      maskless: every query sees every valid key, the whole
         #                      cached prefix plus this chunk, and the dynamic cache
         #                      hands back exactly those.
@@ -176,6 +106,17 @@ class CausalSelfAttention(nn.Module):
         #                      finalize) | sdpa: causal_lower_right in eager, the bool
         #                      prefix+tril mask when compiling or when q/k/v dtypes mix.
         B, T, C = x.size()
+
+        # Uncompiled flex runs torch's debug path, whose backward torch warns "may produce incorrect results".
+        # Training with a BlockMask is supported compiled only — compile_blocks or a whole-trunk compile, both
+        # inductor — so the eager call is refused while gradients are recorded. Checked here, not in GPT.forward:
+        # under compile_blocks the GPT itself still runs eagerly. This cannot certify the compile backend
+        # (backend="eager" passes too); it stops the direct eager call. Before anything below writes the cache.
+        if block_mask is not None and torch.is_grad_enabled() and not torch.compiler.is_compiling():
+            raise RuntimeError("flex attention (a BlockMask) with gradient recording on must run compiled: use "
+                               "compile_blocks(trunk) or compile the whole trunk; evaluation under torch.no_grad() "
+                               "may run uncompiled. If the trunk is compiled, this frame fell back to eager (a graph "
+                               "break, or the recompile limit): TORCH_LOGS=graph_breaks,recompiles shows why")
 
         # Project the input to get queries, keys, and values
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
@@ -222,8 +163,16 @@ class CausalSelfAttention(nn.Module):
             # GQA is native since torch 2.5 (this branch used to expand KV heads by
             # hand; enable_gqa is bitwise-identical to that expansion — verified
             # 2026-07-30 on torch 2.12 across three H/KV/T/D shapes).
-            y = flex_attention(q, k, v, block_mask=block_mask,
-                               enable_gqa=self.enable_gqa)
+            #
+            # Two rules: Q/K are cast to V's dtype first (under bf16 autocast the QK norm returns fp32 while V is
+            # bf16), and the regular flex kernel is forced. For a query length under one 128-block with static
+            # batch/heads, inductor otherwise picks the split-K "flex decoding" template, whose output with this cast
+            # and core's transposed [B,H,T,D] layout was wrong (rel. error 0.87, torch 2.12). The option only
+            # acts once the call is compiled (compile_blocks / whole-trunk); at T >= 128 inductor picks the regular
+            # kernel anyway.
+            y = flex_attention(q.to(v.dtype), k.to(v.dtype), v, block_mask=block_mask,
+                               enable_gqa=self.enable_gqa,
+                               kernel_options={"FORCE_USE_FLEX_ATTENTION": True})
         elif not causal:
             # Bidirectional chunk: checked BEFORE the Tq == Tk branch, which would make
             # a chunk with no cache, or on an empty one, causal.
@@ -335,10 +284,8 @@ class GPT(nn.Module):
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.cos, self.sin = cos, sin
-        # Cast the embeddings from fp32 to bf16: optim can tolerate it and it saves memory: both in the model and the activations
-        if self.transformer.wte.weight.device.type == "cuda":
-            self.transformer.wte.to(dtype=torch.bfloat16)
-            self.type_emb.to(dtype=torch.bfloat16)
+        # Every parameter is left in the dtype it was built in: what it is STORED in is the assembly's choice
+        # (build_system's param_dtype), not the trunk's.
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -402,6 +349,11 @@ class GPT(nn.Module):
         should correct for it — see LMSystem.estimate_flops's contract and the worked
         override in exemplars/nano_world_model's block-diffusion System, where
         uncorrected MFU read 101.6%, i.e. past the card's physical ceiling.
+
+        Packing (several samples per row, each attending only within itself) is the
+        same kind of sparsity, and its density changes with every batch, so no
+        per-position constant is right there; MFU under packing reads high and is not
+        corrected here (see Trainer._calculate_metrics).
         """
         nparams = sum(p.numel() for p in self.parameters())
         nparams_embedding = self.transformer.wte.weight.numel()
@@ -409,8 +361,44 @@ class GPT(nn.Module):
         q, t = self.config.n_embd // self.config.n_head, self.config.sequence_len
         return 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
 
-    def get_device(self):
-        return self.transformer.wte.weight.device
+    @property
+    def rotary_table_len(self):
+        """S, the number of rows in the rotary table: position_ids must lie in 0 .. S-1. S bounds the positions,
+        not the row length T (a packed row may hold more than S positions, each reading a row in the table)."""
+        return self.cos.size(1)
+
+    def set_rotary_table(self, cos, sin):
+        """Install a project's rotary table (e.g. 3-D RoPE): cos and sin [1, S, 1, head_dim/2], S >= 1, bfloat16, on
+        the device of the current table. Checked first, and on any error both old tables stay. The table is not saved
+        in a checkpoint (non-persistent buffers): rebuild or load the model, then install it again; init_weights()
+        installs the default table again, so install yours after it. Refused while a static cache is attached; a
+        dynamic cache the caller holds must be dropped (its cached keys carry the old rotation). Install it before
+        compiling or before the first compiled call: compiled code reads whatever table is installed (a table of the
+        same shape costs no recompile, another length one recompile), but a CUDA graph (mode="reduce-overhead")
+        recorded with the old table stays behind and is checked again on every later call (TORCH_LOGS=cudagraphs
+        shows it as re-recording). Do not edit an installed table in place: install a new one."""
+        if getattr(self, "_static_cache", None) is not None:
+            raise ValueError("set_rotary_table: detach the static cache first (attach_kv_cache(None))")
+        if isinstance(cos, torch.Tensor) and cos.dim() == 4 and cos.shape[1] < 1:
+            raise ValueError("set_rotary_table: the table needs at least one row (S >= 1)")
+        half = self.config.n_embd // self.config.n_head // 2
+        for name, t in (("cos", cos), ("sin", sin)):
+            if isinstance(t, nn.Parameter):          # assigning one would turn the buffer into a parameter
+                raise ValueError(f"set_rotary_table: {name} is a Parameter; the table is a non-persistent buffer: "
+                                 f"pass a plain tensor ({name}.detach())")
+            if not isinstance(t, torch.Tensor) or t.dim() != 4 or t.shape[0] != 1 or t.shape[2] != 1 \
+                    or t.shape[3] != half:
+                raise ValueError(f"set_rotary_table: {name} must be [1, S, 1, {half}], got "
+                                 f"{tuple(t.shape) if isinstance(t, torch.Tensor) else type(t).__name__}")
+            if t.dtype != torch.bfloat16:
+                raise ValueError(f"set_rotary_table: {name} must be bfloat16, got {t.dtype}")
+            if t.device != self.cos.device:
+                raise ValueError(f"set_rotary_table: {name} is on {t.device}, the table lives on {self.cos.device}")
+        if cos.shape != sin.shape:
+            raise ValueError(f"set_rotary_table: cos {tuple(cos.shape)} and sin {tuple(sin.shape)} differ")
+        # registered explicitly as non-persistent: an nn.Buffer assigned as an attribute would make itself persistent
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
 
     def attach_kv_cache(self, cache):
         """Attach a StaticKVCache, then decode with `kv_cache=STATIC`.
@@ -429,7 +417,7 @@ class GPT(nn.Module):
             block.attn._static_cache = cache
         return self
 
-    def forward(self, idx, token_types=None, kv_cache=None, block_mask=None, *, causal=None):
+    def forward(self, idx, token_types=None, kv_cache=None, *, attention="causal", position_ids=None):
         """
         Transformer body only (the "trunk") — returns hidden_states [B, T, H].
 
@@ -440,43 +428,74 @@ class GPT(nn.Module):
             idx: [B, T] token ids
             token_types: [B, T] token type ids (optional)
             kv_cache: KV cache for inference
-            block_mask: FlexAttention mask (optional)
-            causal: a shortcut for standard next-token-prediction (autoregressive)
-                attention, so that this case needs no block_mask. With P positions
-                already cached and these T new ones, query i sees key j iff
-                    True   j <= P + i   (causal, offset by the cached prefix)
-                    False  j <  P + T   (the whole prefix plus this chunk,
-                                         bidirectionally: a block-diffusion denoise pass)
-                None (default) means causal, or block_mask's pattern if one is given.
-                The prefix is never recomputed, and never sees the chunk. Under
-                torch.compile None and True are different graphs: on a compiled hot
-                path, pass one of them consistently.
-                Interim: the mask arguments (causal, attn_mask, block_mask) overlap;
-                this is a stopgap, and their roles will be reorganized.
+            attention: which positions each position may read, one of
+                "causal" (default)  each position reads itself and the positions before it;
+                "bidirectional"     every position of this input reads every other one (a block-diffusion
+                                    denoise pass);
+                a BlockMask         exactly the visibility it encodes, nothing added (flex attention). With
+                                    gradient recording on, the flex call must run compiled (compile_blocks or a
+                                    whole-trunk compile) and an uncompiled one is refused; under torch.no_grad()
+                                    it may run uncompiled.
+                With P positions already cached and n new ones: under "causal" the i-th new position reads the
+                whole prefix and new positions 0..i, under "bidirectional" the whole prefix and all n; the prefix
+                is never recomputed and never reads this input. A BlockMask works with the dynamic cache (its
+                queries are the n new positions 0..n-1, its keys the P cached ones and then these, 0..P+n-1: build
+                it with Q_LEN=n, KV_LEN=P+n) and is refused with the static cache.
+            position_ids: optional [B, T] int64 — for each token, WHICH row of the rotary table it reads (a table
+                index, not a coordinate: the project decides what positions mean, e.g. a packed sample's in-sample
+                offset doc_pos, and the GPT only reads cos/sin there). Every value must lie in
+                0 .. rotary_table_len-1: checked where the table is read — a device-side assert on CUDA (no host
+                sync; a violation stops the process), an error on the CPU. None = the default 0..T-1 (offset by the
+                cache). Training / teacher-forcing only: refused together with a KV cache, before anything is
+                written.
         """
         # Checked before any layer writes the cache, so a refused call leaves it as it was.
         # Raised, not asserted: `python -O` strips asserts, and these guard a contract.
-        if causal is not None and type(causal) is not bool:
-            raise TypeError(f"causal must be None, True or False, got {type(causal).__name__}")
-        if causal is not None and block_mask is not None:
-            raise ValueError("pass causal or block_mask, not both")
+        if isinstance(attention, BlockMask):
+            block_mask, causal = attention, True
+        elif isinstance(attention, str) and attention in _ATTENTION_NAMES:
+            block_mask, causal = None, attention == "causal"
+        else:
+            raise TypeError(f'attention must be "causal", "bidirectional" or a BlockMask, got {attention!r}')
+        if position_ids is not None:
+            if kv_cache is not None:
+                raise ValueError("position_ids is for training / teacher-forcing; it is not combined with a KV cache")
+            if (not isinstance(position_ids, torch.Tensor) or position_ids.dtype != torch.long
+                    or position_ids.shape != idx.shape or position_ids.device != idx.device):
+                raise ValueError("position_ids must be an int64 tensor shaped and placed like idx")
         if kv_cache is STATIC:
             if block_mask is not None:
-                raise ValueError("the static cache does not take a block_mask")
+                raise ValueError("the static cache does not take a BlockMask")
             if getattr(self, "_static_cache", None) is None:
                 raise RuntimeError("kv_cache=STATIC needs a cache attached first: attach_kv_cache(cache)")
-        causal = causal is not False
 
         B, T = idx.size()
         device = idx.device
 
+        # Under autocast each embedding lookup is cast to the autocast dtype before the sum, as autocast casts a
+        # matmul's weights: a no-op for bf16 embeddings, and with fp32 storage (build_system param_dtype) the
+        # arithmetic stays that of bf16 storage, rounding where it rounded. Outside autocast nothing changes. (The
+        # stream itself turns fp32 at the norm below: autocast runs rms_norm in fp32.)
+        autocast_dtype = torch.get_autocast_dtype(device.type) if torch.is_autocast_enabled(device.type) else None
         x = self.transformer.wte(idx)
+        if autocast_dtype is not None:
+            x = x.to(autocast_dtype)
 
         if token_types is not None:
-            x = x + self.type_emb(token_types)
+            # one_hot @ W rather than the lookup self.type_emb(token_types), for a deterministic backward. The
+            # lookup's CUDA backward accumulates with atomics; with a handful of types sharing tens of thousands of
+            # positions, the order of those adds changed from run to run, and with fp32 storage the gradient's low
+            # bits with it. Under autocast the term is the lookup's rows bit for bit, and its
+            # gradient comes out of a bf16 GEMM, rounded to bf16 as every matrix's is. Without autocast it is a
+            # GEMM in the weight's dtype and follows the float32 matmul precision like every other matmul there
+            # (exact in bf16; TF32 under "high", which the training entries set).
+            # token_types must be int64 (the lookup also took int32).
+            w = self.type_emb.weight
+            t = F.one_hot(token_types, w.size(0)).to(w.dtype) @ w
+            x = x + (t if autocast_dtype is None else t.to(autocast_dtype))
 
-        assert T <= self.cos.size(1), f"Sequence length {T} exceeds rotary cache {self.cos.size(1)}"
-        assert device == self.cos.device, f"Device mismatch: {device} != {self.cos.device}"
+        if position_ids is None:
+            assert T <= self.cos.size(1), f"Sequence length {T} exceeds rotary cache {self.cos.size(1)}"
         assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be bfloat16"
 
         attn_mask = None
@@ -489,6 +508,19 @@ class GPT(nn.Module):
             cache = self._static_cache
             cos_sin = cache.rotary(self.cos, self.sin, T)
             attn_mask = cache.attn_mask(T, device, causal)
+        elif position_ids is not None:
+            # A negative index would silently read the far end of the table, so the range is checked HERE, where the
+            # current table is read (it covers every preparation, core's or a project's, and a table installed
+            # later). On CUDA a device-side assert: no host sync on the hot path; a violation stops the process.
+            S = self.cos.size(1)
+            inside = (position_ids >= 0) & (position_ids < S)
+            if position_ids.is_cuda:
+                torch._assert_async(inside.all(), "position_ids outside the rotary table (0 <= position_ids < S)")
+            elif not bool(inside.all()):
+                raise ValueError(f"position_ids outside the rotary table: values must lie in 0..{S - 1}, got "
+                                 f"{int(position_ids.min())}..{int(position_ids.max())}")
+            # per-token rows of the rotary table: [1, S, 1, D/2] -> [B, T, 1, D/2], broadcast over the heads
+            cos_sin = self.cos[0][position_ids], self.sin[0][position_ids]
         else:
             T0 = 0 if kv_cache is None else kv_cache.get_pos()
             cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T]

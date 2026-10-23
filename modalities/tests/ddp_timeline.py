@@ -45,7 +45,6 @@ Bucket layout (block_buckets, plus the head at the front — see nano_ddp.py):
 """
 import argparse
 import json
-import os
 from pathlib import Path
 from statistics import median
 
@@ -53,14 +52,14 @@ import torch
 import torch.distributed as dist
 from torch._utils import _flatten_dense_tensors as _flatten
 
-from core.data.mixed_dataloader import MixedDataLoader
 from core.model.gpt import GPT, GPTConfig
 from core.parallel import NanoDDP, block_buckets, sync_gradients
 from core.training.model_setup import build_system, compile_blocks
-from core.utils import print0
+from core.utils import print0, process_identity, set_torch_global_defaults
 
 from modalities.text import get_tokenizer
-from modalities.text.streams import resolve_sources
+from modalities.text.streams import make_text_loader, resolve_sources
+from core.model.system import prepare_unpacked_AR_trunk_inputs
 import modalities.text.train_text as text_orchestrator
 
 # The d12 recipe constants, inlined rather than imported from
@@ -153,22 +152,20 @@ def build(args):
     # head_ce pinned for the same reason the compile mode is: this is an
     # instrument, and its two arms must differ only in world size.
     setup = build_system(GPT, cfg, head_ce="liger",
-                         seed=SEED, parallel="ddp")
+                         seed=SEED, parallel="ddp", prepare_trunk_inputs_fn=prepare_unpacked_AR_trunk_inputs)
     system = setup["system"]
     compile_blocks(system.trunk)
 
-    sources = resolve_sources({"sequence_len": args.seq,
-                               **{k: v for k, v in args.data.items()}},
-                              args.seq, device="cuda")
-    dataloader = MixedDataLoader(
-        loader_config={"batch_size": args.bs,
-                       "data": {"sequence_len": args.seq, "sources": sources}},
-        tokenizers={"text": tokenizer, "layout": layout, "control_resolver": resolver},
-        source_types=text_orchestrator.SOURCE_TYPES, resume_state_dict=None)
+    sources = resolve_sources(dict(args.data), args.seq, device="cpu")
+    dataloader = make_text_loader(
+        {"data": {"sources": sources}},
+        {"text": tokenizer, "layout": layout, "control_resolver": resolver},
+        text_orchestrator.SOURCE_TYPES, batch_size=args.bs, sequence_len=args.seq, device="cuda")
     return system, dataloader, setup["world_size"]
 
 
 def main():
+    set_torch_global_defaults()    # measured under the training entries' process-wide settings
     ap = argparse.ArgumentParser()
     ap.add_argument("--depth", type=int, default=DEPTH)
     ap.add_argument("--seq", type=int, default=512)
@@ -237,7 +234,7 @@ def main():
                            for i, (s, e) in sorted(ddp.comm_ev.items())}
         samples.append(row)
 
-    if int(os.environ.get("RANK", 0)) != 0:
+    if process_identity().rank != 0:
         dist.destroy_process_group()
         return
 

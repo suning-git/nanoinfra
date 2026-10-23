@@ -4,20 +4,38 @@ Reference numbers, so you can tell whether your run is training or broken. All o
 RTX 5090s, 12 layers / 768 dim / 12 heads (233M params), the default 17-frame 128px
 geometry.
 
-## Is the pipeline alive? (one minute)
+> **Storage precision.** These numbers were measured with the parameters, their gradients and the AdamW moments
+> stored in bf16, core's only storage when they ran (code up to v0.2.0). Training now stores them in fp32 by default
+> (the `param_dtype` config key; the arithmetic stays under bf16 autocast), so a run on current code differs from them
+> a little in the first minute and more over a long run. `param_dtype=bf16` returns to the storage they used; to
+> reproduce them exactly, use v0.2.0.
+
+> **Pipeline.** Since 2026-10 the exemplar trains block diffusion only, on core's data pipeline, with each block's
+> mean CE over its masked cells as the loss. The readings below the quickstart were measured before that, on the
+> exemplar's own fixed-row loader with MDLM's 1/t weight. Side by side on the same card, the same data and the same
+> seeds (2000 steps of 4 rows, val every 500, two seeds each) the two read the same within seed noise: at step 1999
+> 9.4120 / 9.4084 (now) against 9.3965 / 9.4101 (before), while the two seeds of one version differ by up to 0.044
+> along the way; a step takes 76 ms in both. With the old code's masks injected and the same loss weights on both
+> paths, the new path's inputs, per-token CE, loss and every gradient are the old path's bit for bit.
+
+## Is the pipeline alive? (under a minute)
 
 Straight after `build_cache.py`, on a few thousand clips:
 
 ```bash
 python -m exemplars.nano_world_model.train_wm \
-    max_steps=30 optimizer.scheduler.warmup_steps=5 \
-    evaluation.interval_steps=15 compile_trunk=false checkpoint.enabled=false
+    max_steps=15 optimizer.scheduler.warmup_steps=5 \
+    evaluation.interval_steps=15 evaluation.val_rows=100 checkpoint.enabled=false
 ```
 
+Training runs through flex attention, which must run compiled, so the run first
+compiles each block (`compile_trunk: true`, the default; core's trunk refuses an
+uncompiled flex call with gradients on). It evaluates 100 of the val clips, at the
+first step and the last. On 4733 training clips, one RTX 5090, 17 s from launch to exit:
+
 ```
-Step 00000  loss 11.39   val/nelbo 11.474
-Step 00015               val/nelbo 10.974
-Step 00029  loss 10.94   val/nelbo 10.791
+Step 00000  loss 11.48   val/nelbo 11.472
+Step 00014  loss 11.14   val/nelbo 10.969
 ```
 
 The absolute values depend on how much data you built; what matters is that the
@@ -26,7 +44,9 @@ NELBO moves down immediately and the four `val/nelbo_t*` levels stay within abou
 model is not receiving gradients; levels that disagree wildly at step 0 mean the row
 layout and the objective disagree about where blocks start.
 
-Throughput at this size, single GPU, no compile: **~130k tok/s, MFU ~79%**.
+Throughput at this size, single GPU: **~149k tok/s, 76 ms a step** (4 rows of 2816
+positions, two micro-batches), MFU ~51% by block_diffusion.py's corrected estimate.
+An evaluation of the 420 val clips at four noise levels takes about 8 s.
 
 ## Does it actually learn? (a real run)
 
@@ -46,13 +66,11 @@ v2; the quickstart above was re-verified to the digit on the new stack, this
 a different regime anyway — expect higher numbers and earlier overfitting; the
 curve's shape is the thing to compare, not its height.
 
-NELBO is in nats per predicted token and is one-directionally comparable to an
-autoregressive nll: NELBO ≥ NLL, so a lower number definitively beats AR and a
-higher one is inconclusive.
+NELBO is in nats per predicted token.
 
 ### The optimizer finding behind the config
 
-core's `create_optimizers` uses role-based multi-LR groups, `embedding_lr` 0.2 and
+core's `build_optimizers` uses role-based multi-LR groups, `embedding_lr` 0.2 and
 `unembedding_lr` 0.004, tuned on text. On this model they cost **0.34 nat at 10k
 steps** — 9.336 against 8.999 for a single LR. The plausible reason is that the video
 band is 64000 codes that each appear rarely, so 0.2 on the embedding is far too hot,
@@ -108,29 +126,31 @@ Regime effects you should see on your own corpus, whatever its absolute level:
   within ±0.024 nat of the twin's reference corpus at equal volume — the
   minimal recorder is not the bottleneck.
 
-## Decoding the autoregressive model
+## Generating
 
-`inference/benchmark.py`, one RTX 5090, 12 layers / 768 dim, 256-token segments:
+`inference/benchmark.py`, one RTX 5090, 12 layers / 768 dim, random weights, 17-frame
+clips, 8 denoising rounds per latent frame, the machine otherwise idle:
 
 ```
-teacher-forced argmax: 518/518 agree
-greedy segment 0/1/2:  256/256 identical   (2 and 3 continue on the live cache)
+block 1: max |logit diff| 0.0234, argmax agrees on 256/256
+block 2: max |logit diff| 0.0233, argmax agrees on 254/256, top1-top2 margins where not: [0.0153, 0.0]
+block 3: max |logit diff| 0.0233, argmax agrees on 256/256
+block 4: max |logit diff| 0.0232, argmax agrees on 256/256
 
-static, eager          3.958 ms/token   0.99 latent frames/s ( 3.9 game frames/s)
-static, cuda graphs    1.128 ms/token   3.46 latent frames/s (13.9 game frames/s)
-                                                    3.5x
+36.3 ms per latent frame (4 game frames): 110 game frames/s, eager trunk, dynamic KV cache
 ```
 
-Equivalence is reported before speed on purpose: a decode path that is fast and
-subtly wrong is worse than a slow one. The checks are the ones that survive a kernel
-change — teacher-forced argmax (no cascade, so a disagreement is pure numerics) and
-greedy decode. Draw-for-draw identity at finite temperature is not a meaningful
-target; bf16 noise flips near-tied candidates either way.
+Agreement comes before speed on purpose: a sampler that is fast and subtly wrong is
+worse than a slow one. The comparison is with the training forward on the same block —
+the sampler's SDPA over a KV cache against flex over the two-stream row — so under bf16
+the logits agree to rounding, not bit for bit — the two cells of block 2 whose argmax
+differs are near-ties (margins 0.015 and 0.0); in float32 on the CPU
+(`tests/test_sampler.py`) they agree to 1e-5.
 
-The speedup is overhead, not arithmetic. At this size a decode step spends most of
-its time launching kernels, and CUDA graphs replay a recorded launch sequence instead.
-That is also why the number will look different on a larger model: the same absolute
-overhead against more work per token.
+A latent frame costs one forward for its actions, eight over its 256 cells and one to
+commit it. With an eager trunk most of that is launching kernels, so the number depends
+on the CPU as much as on the GPU: with a training job starting up on the other GPU of
+the same box (compiling, preparing batches) the same run took 83 ms.
 
 ## Multi-GPU
 
@@ -143,8 +163,9 @@ overhead against more work per token.
 | torch DDP | 105.9k | 19GB |
 | FSDP, sharded | 93.6k | 30GB |
 
-The model fits, so the bottleneck is activations rather than parameters and sharding
-buys nothing. `tests/test_ddp.py` checks that the faster path is also the correct
+(Measured on an earlier version of the exemplar, whose single-GPU throughput was below
+today's ~149k tok/s; read the rows against each other, not against that line.) The model
+fits, so the bottleneck is activations rather than parameters and sharding buys nothing. `tests/test_ddp.py` checks that the faster path is also the correct
 one — see the README for what each check would catch.
 
 Communication is about 6% of a step at this clip length. That is not a general fact:

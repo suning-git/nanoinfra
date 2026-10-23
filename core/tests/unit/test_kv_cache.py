@@ -155,7 +155,7 @@ def test_sample_tokens_greedy_and_topk():
 
 
 # ---------------------------------------------------------------------------
-# rewind, and what a forward may see (causal=)
+# rewind, and what a forward may see (attention=)
 # ---------------------------------------------------------------------------
 
 def _ids(B, T, seed):
@@ -183,15 +183,15 @@ def test_rewind_forgets_bitwise():
     trunk(prefix, kv_cache=clean)
     direct = trunk(nxt, kv_cache=clean)
 
-    for causal in (True, False):
+    for attention in ("causal", "bidirectional"):
         dirty = KVCache.for_model(trunk.config, 2, 64)
         trunk(prefix, kv_cache=dirty)
-        trunk(junk, kv_cache=dirty, causal=causal)
+        trunk(junk, kv_cache=dirty, attention=attention)
         dirty.rewind(7)
         dirty.rewind(0)
         assert dirty.get_pos() == 12
         assert torch.equal(direct, trunk(nxt, kv_cache=dirty)), \
-            f"rewound cache (junk written causal={causal}) is not bitwise a clean one"
+            f"rewound cache (junk written with attention={attention}) is not bitwise a clean one"
 
     dirty.rewind(dirty.get_pos())
     assert dirty.get_pos() == 0
@@ -240,33 +240,33 @@ def test_who_sees_what():
     trunk = small_system().trunk
     prefix, chunk = _ids(1, 6, 1), _ids(1, 5, 2)
 
-    def run(chunk_ids, causal, prefix_ids=prefix):
+    def run(chunk_ids, attention, prefix_ids=prefix):
         cache = KVCache.for_model(trunk.config, 1, 64)
         trunk(prefix_ids, kv_cache=cache)
-        return trunk(chunk_ids, kv_cache=cache, causal=causal)
+        return trunk(chunk_ids, kv_cache=cache, attention=attention)
 
     def moved(a, b):
         return [not torch.equal(a[:, i], b[:, i]) for i in range(a.size(1))]
 
     # The chunk's LAST token: causal hides it from every earlier query; bidirectional
     # shows it to all of them.
-    assert moved(run(chunk, True), run(_poke(chunk, 4), True)) == [False] * 4 + [True]
-    assert moved(run(chunk, False), run(_poke(chunk, 4), False)) == [True] * 5
+    assert moved(run(chunk, "causal"), run(_poke(chunk, 4), "causal")) == [False] * 4 + [True]
+    assert moved(run(chunk, "bidirectional"), run(_poke(chunk, 4), "bidirectional")) == [True] * 5
     # The prefix's FIRST token is seen by every query either way.
-    for causal in (True, False):
-        assert moved(run(chunk, causal), run(chunk, causal, _poke(prefix, 0))) == [True] * 5
+    for attention in ("causal", "bidirectional"):
+        assert moved(run(chunk, attention), run(chunk, attention, _poke(prefix, 0))) == [True] * 5
 
 
 @pytest.mark.parametrize("n_kv_head", [2, 1])          # plain attention, then GQA
 def test_bidirectional_without_a_prefix(n_kv_head):
-    """causal=False on an EMPTY cache (and with no cache) is plain bidirectional
+    """attention="bidirectional" on an EMPTY cache (and with no cache) is plain bidirectional
     attention — it must not be taken for a causal full-prefix pass because Tq == Tk."""
     trunk = small_system(n_kv_head=n_kv_head).trunk
     x = _ids(1, 9, 4)
     for kv in (None, "empty"):
         def run(ids):
             cache = KVCache.for_model(trunk.config, 1, 64) if kv else None
-            return trunk(ids, kv_cache=cache, causal=False)
+            return trunk(ids, kv_cache=cache, attention="bidirectional")
         a, b = run(x), run(_poke(x, 8))
         assert not torch.equal(a[:, 0], b[:, 0]), \
             f"kv_cache={kv}: the first query does not see the last token"
@@ -275,10 +275,69 @@ def test_bidirectional_without_a_prefix(n_kv_head):
 def test_causal_is_the_default():
     trunk = small_system().trunk
     x, nxt = _ids(1, 8, 5), _ids(1, 3, 6)
-    assert torch.equal(trunk(x), trunk(x, causal=True))
+    assert torch.equal(trunk(x), trunk(x, attention="causal"))
     a, b = KVCache.for_model(trunk.config, 1, 64), KVCache.for_model(trunk.config, 1, 64)
-    assert torch.equal(trunk(x, kv_cache=a), trunk(x, kv_cache=b, causal=True))
-    assert torch.equal(trunk(nxt, kv_cache=a), trunk(nxt, kv_cache=b, causal=True))
+    assert torch.equal(trunk(x, kv_cache=a), trunk(x, kv_cache=b, attention="causal"))
+    assert torch.equal(trunk(nxt, kv_cache=a), trunk(nxt, kv_cache=b, attention="causal"))
+
+
+def test_a_block_mask_with_the_dynamic_cache_uses_its_documented_indices():
+    """With P cached positions and n new ones, a BlockMask's queries are the n new positions (0..n-1) and its keys
+    the P cached ones followed by these (0..P+n-1): Q_LEN=n, KV_LEN=P+n. So "key kv <= query q + P" is the same
+    visibility as "causal", and a mask showing every key to every query the same as "bidirectional"; a mask that
+    takes the keys to start at the new positions (kv <= q) must come out different. Under no_grad: an uncompiled
+    flex call is refused only while gradients are recorded."""
+    from torch.nn.attention.flex_attention import create_block_mask
+    trunk = small_system().trunk
+    P, n = 6, 5
+    prefix, chunk = _ids(1, P, 1), _ids(1, n, 2)
+
+    def mask(rule):
+        return create_block_mask(rule, B=None, H=None, Q_LEN=n, KV_LEN=P + n, device=DEVICE)
+    outs = {}
+    with torch.no_grad():
+        for name, attention in (("prefix_causal", mask(lambda b, h, q, kv: kv <= q + P)), ("causal", "causal"),
+                                ("everything", mask(lambda b, h, q, kv: q >= 0)), ("bidirectional", "bidirectional"),
+                                ("off_by_P", mask(lambda b, h, q, kv: kv <= q))):
+            cache = KVCache.for_model(trunk.config, 1, 64)
+            trunk(prefix, kv_cache=cache)
+            outs[name] = trunk(chunk, kv_cache=cache, attention=attention).float()
+    torch.testing.assert_close(outs["prefix_causal"], outs["causal"], rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(outs["everything"], outs["bidirectional"], rtol=2e-2, atol=2e-2)
+    assert float((outs["off_by_P"] - outs["causal"]).abs().max()) > 0.1
+
+
+def test_uncompiled_flex_with_gradient_recording_on_is_refused_before_the_cache_is_written():
+    from torch.nn.attention.flex_attention import create_block_mask
+    trunk = small_system().trunk
+    x = _ids(1, 8, 3)
+    mask = create_block_mask(lambda b, h, q, kv: q >= kv, B=None, H=None, Q_LEN=8, KV_LEN=8, device=DEVICE)
+    with pytest.raises(RuntimeError, match="gradient recording on must run compiled"):
+        trunk(x, attention=mask)
+    with torch.no_grad():                                    # evaluation may run uncompiled
+        torch.testing.assert_close(trunk(x, attention=mask).float(), trunk(x).float(), rtol=2e-2, atol=2e-2)
+    cache = KVCache.for_model(trunk.config, 1, 64)
+    with torch.no_grad():
+        trunk(_ids(1, 4, 7), kv_cache=cache)
+    before = [t.clone() for t in cache.k + cache.v]
+    with pytest.raises(RuntimeError, match="gradient recording on must run compiled"):
+        trunk(_ids(1, 3, 8), kv_cache=cache, attention=create_block_mask(
+            lambda b, h, q, kv: kv <= q + 4, B=None, H=None, Q_LEN=3, KV_LEN=7, device=DEVICE))
+    assert cache.get_pos() == 4 and all(torch.equal(a.view(torch.uint8), b.view(torch.uint8))
+                                        for a, b in zip(before, cache.k + cache.v))
+
+
+def test_a_flex_call_inside_a_compiled_frame_is_let_through(monkeypatch):
+    """The refusal is for the direct eager call: inside a compile capture (torch.compiler.is_compiling()) the same
+    call goes on. Stood in for here by making is_compiling() true; nothing requires grad, because uncompiled flex has
+    no backward on the CPU. Compiled training itself is checked on the GPU (test_model_inputs.py)."""
+    from torch.nn.attention.flex_attention import create_block_mask
+    trunk = small_system().trunk.requires_grad_(False)
+    x = _ids(1, 8, 3)
+    mask = create_block_mask(lambda b, h, q, kv: q >= kv, B=None, H=None, Q_LEN=8, KV_LEN=8, device=DEVICE)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    assert torch.is_grad_enabled()
+    assert torch.isfinite(trunk(x, attention=mask).float()).all()
 
 
 def test_visibility_is_checked_before_the_cache_is_written():
@@ -289,10 +348,10 @@ def test_visibility_is_checked_before_the_cache_is_written():
     trunk(_ids(1, 4, 7), kv_cache=cache)
     before = [t.clone() for t in cache.k + cache.v]
     x = _ids(1, 3, 8)
-    for kw, error, msg in ((dict(causal=1), TypeError, "causal must be"),
-                           (dict(causal="no"), TypeError, "causal must be"),
-                           (dict(causal=True, block_mask=object()), ValueError, "not both"),
-                           (dict(causal=False, block_mask=object()), ValueError, "not both")):
+    for kw, error, msg in ((dict(attention=1), TypeError, "attention must be"),
+                           (dict(attention="no"), TypeError, "attention must be"),
+                           (dict(attention=None), TypeError, "attention must be"),
+                           (dict(position_ids=torch.zeros_like(x)), ValueError, "position_ids")):
         with pytest.raises(error, match=msg):
             trunk(x, kv_cache=cache, **kw)
         assert cache.get_pos() == 4, f"the refused call {kw} wrote the cache"
@@ -302,7 +361,7 @@ def test_visibility_is_checked_before_the_cache_is_written():
                    for a, b in zip(before, cache.k + cache.v)), \
             f"the refused call {kw} wrote the cache"
     with pytest.raises(TypeError):
-        trunk(x, None, cache, None, False)                   # causal is keyword-only
+        trunk(x, None, cache, "bidirectional")               # attention is keyword-only
 
 
 # ---------------------------------------------------------------------------

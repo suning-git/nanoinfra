@@ -1,4 +1,4 @@
-"""The metrics sink seam (queue #4).
+"""The metrics sink seam.
 
 Trainer.train() creates ONE sink on rank 0 through `_init_metrics()` and sends both
 the periodic training metrics and every evaluator's results through its
@@ -21,7 +21,7 @@ import torch
 import torch.nn.functional as F
 
 from core.model.gpt import GPTConfig
-from core.model.system import LMSystem
+from core.model.system import LMSystem, prepare_unpacked_AR_trunk_inputs
 from core.training.optim import build_optimizers
 from core.training.trainer import Trainer
 from core.utils import DummyWandb
@@ -100,8 +100,8 @@ class _Sink:
 
 def _trainer(cls=Trainer, rank=0, config=CONFIG):
     torch.manual_seed(0)
-    system = LMSystem(_Trunk(), _Head())
-    opts = build_optimizers(system, config["optimizer"], 1)
+    system = LMSystem(_Trunk(), _Head(), prepare_trunk_inputs_fn=prepare_unpacked_AR_trunk_inputs)
+    opts = build_optimizers(system, config["optimizer"])
     return cls(system=system, optimizers=opts, dataloader=_batches(), config=config,
                rank=rank, world_size=1, evaluators=[_Eval()])
 

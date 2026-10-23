@@ -64,7 +64,7 @@ def main():
     r = decode.render("text", row, vocab)
     units = [u for u in r.units if u["band"] == "text"][:40]
     md += ["## 文本", "",
-           f"行长 {len(row)}(= sequence_len - 1,因为位置 i 预测 i+1),"
+           f"行长 {len(row)}(= sequence_len;样本有 sequence_len + 1 个 token,位置 i 预测 i+1),"
            f"其中 {len([u for u in r.units if u['band']=='text'])} 个文本 token。", "",
            "**分段**:`" + " | ".join(f"{s['label']}×{s['end']-s['start']}" for s in r.spans) + "`", "",
            "**前 40 个 token 的切分**(`|` 是 token 边界,这是 BPE 真正做的事):", "",

@@ -235,7 +235,7 @@ def video_cache_dir(frames=FRAMES, res=RES):
 RECIPES = {
     "text":   {"depth": 12, "dim": 768, "seq": 512},
     "motion": {"depth": 6,  "dim": 384, "seq": 256},
-    "video":  {"depth": 12, "dim": 768, "seq": None},   # None -> video_shape()["row_len"]
+    "video":  {"depth": 12, "dim": 768, "seq": None},   # None -> video_shape()["row_len"] - 1 positions
 }
 
 SEED = 42

@@ -2,7 +2,8 @@
 spec.py — the model + recipe this project trains. THE one knob to turn.
 
 Every stage reads from here, so re-targeting the project is a one-line edit:
-change DEPTH (or LR_MAX) and pretrain / scaling / inference all follow. You do
+change DEPTH (or LR_MAX) and pretrain / inference follow; scaling.py takes DEPTH
+per size and pins its own LR and head (the head compiled, as here). You do
 not hunt for a model definition scattered across scripts.
 
 What is NOT here: training itself. That is the blessed text Orchestrator
@@ -12,7 +13,7 @@ full assemble -> train flow). This project only picks the knobs and drives it.
 
 # --- the model + recipe (edit here to re-target the whole pipeline) -----------
 DEPTH  = 12          # transformer depth; dim = DEPTH * 64 = 768  ->  ~135M params
-LR_MAX = "3e-4"      # max LR — chosen by the LR bracket (see provenance.md);
+LR_MAX = "6e-4"      # max LR — chosen in fp32 storage with the compiled head (see provenance.md);
                      #          kept a string so it doubles as the checkpoint tag
 SEED   = 42
 
@@ -40,7 +41,7 @@ def train_overrides(depth=DEPTH, lr=LR_MAX, parallel=None, **extra):
     """Hydra CLI overrides pinning this project's recipe on top of the
     orchestrator's blessed defaults. Checkpointing / eval cadence are per-stage
     concerns (the champion saves; scaling cells do not) — a stage adds those via
-    **extra. Returns a list like ['model.depth=12', 'optimizer.lr_max=3e-4', ...].
+    **extra. Returns a list like ['model.depth=12', 'optimizer.lr_max=6e-4', ...].
     """
     ov = {
         "model.depth": depth,
@@ -51,11 +52,12 @@ def train_overrides(depth=DEPTH, lr=LR_MAX, parallel=None, **extra):
         # Which implementation computes the head's cross-entropy. core defaults to
         # "naive" (it must: the default may not decide to compile, and it may not
         # depend on an optional package). This project states its own, because the
-        # numbers in RESULTS.md were measured on this arm and the three arms differ
-        # in NUMERICS, not only speed. Requires `pip install -e '.[liger]'` — see
-        # README "Prerequisites". "compiled" is faster at every depth we measured
-        # (RESULTS.md §"The head's three arms"); switching means re-pinning.
-        "head_ce": "liger",
+        # champion's numbers in RESULTS.md were measured on this arm and the three
+        # arms differ in NUMERICS, not only speed. "compiled" is the fastest arm at
+        # every depth we measured and needs no optional package (RESULTS.md §"The
+        # head's three arms"). scaling.py pins its own head, compiled too since
+        # 2026-10-22 (its shipped curves were measured with liger).
+        "head_ce": "compiled",
     }
     if parallel:
         ov["parallel"] = parallel   # multi-GPU placement; see pretrain.py --parallel

@@ -15,7 +15,7 @@ version). So a run that writes jsonl is a wandb-shaped object plus a four-line
 Trainer subclass. Overriding `_init_metrics` is the sanctioned door, not a pry bar.
 
 Nothing here belongs in core yet: it has one consumer. When it has two it can earn
-its way in (core/vision.md, "When Patterns Emerge").
+its way in: a pattern moves into core once a second project needs it.
 
     <ckpt_dir>/metrics.jsonl, one JSON object per line:
     {"step": 1200, "train/loss": 4.31, "train/mfu": 41.2, "val/motion_ce": 5.02}

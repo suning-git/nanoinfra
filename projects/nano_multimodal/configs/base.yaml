@@ -26,9 +26,11 @@ compile_trunk: true   # this script decides how to compile the trunk after assem
 # It matters most where the model is SMALL — a shallow trunk is outweighed by its own
 # un-embedding. There is deliberately no "auto": the three arms differ in NUMERICS,
 # not only speed, so which arm a run takes must not depend on what happens to be
-# pip-installed. RE-MEASURE ON A100 before pinning: every published figure for these
-# arms in this repo was measured on an RTX 5090.
-head_ce: liger
+# pip-installed. compiled since 2026-10-22 (it was liger): the fastest arm here, training
+# and evaluation alike — one RTX 5090, 300 steps, liger -> compiled: text d12 805 -> 630 ms
+# a step, video d12 425 -> 272 ms, motion d6 32 -> 12 ms; peak memory +0.3 / +4.4 / +0.1 GiB.
+# The README's tables were measured with liger.
+head_ce: compiled
 
 # "ddp" replicates the model and reduces gradients during backward (NanoDDP);
 # "fsdp" shards parameters. Ignored on one GPU. While the model FITS, replicating

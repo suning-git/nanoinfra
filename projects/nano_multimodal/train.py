@@ -21,7 +21,7 @@ WHY THERE IS NO PER-LINE BRANCH IN THIS FILE. The three lines differ in four
 things and all four are declarations: which bands to activate (spec.LINES), which
 DataSource class to build (a string, resolved through a LOCAL mapping), how the
 row is laid out (a SequenceRecipe template in yaml), and which positions carry
-loss (loss_weights, written by the data source). Everything else — GPT trunk,
+loss (supervision_mask, written by the data source). Everything else — GPT trunk,
 LMHead, next-token CE, MixedDataLoader, Trainer — is literally the same object.
 If you ever find yourself adding `if line == ...` here, that is the signal the
 difference belongs in a data source or a config instead.
@@ -56,10 +56,11 @@ from projects.nano_multimodal import spec                     # noqa: E402
 spec.pin_tokenizer()                                          # MUST precede modalities.text
 
 from core.model.gpt import GPT                                # noqa: E402
+from core.model.system import prepare_unpacked_AR_trunk_inputs  # noqa: E402
 from core.parallel import NanoDDP, block_buckets              # noqa: E402
 from core.training.model_setup import build_system, compile_blocks, compile_system_trunk  # noqa: E402
-from core.training.trainer import create_optimizers           # noqa: E402
-from core.utils import print0                                 # noqa: E402
+from core.training.optim import build_optimizers              # noqa: E402
+from core.utils import print0, process_identity, set_torch_global_defaults  # noqa: E402
 
 from projects.nano_multimodal import assembly                 # noqa: E402
 
@@ -95,15 +96,16 @@ def batch_plan(config, sequence_len, world_size):
 
 @hydra.main(version_base=None, config_path="configs", config_name="text")
 def main(cfg: DictConfig) -> None:
+    # Process-wide PyTorch settings (CUDA allocator, TF32) are the entry's to make, before anything uses CUDA.
+    set_torch_global_defaults()
     config = OmegaConf.to_container(cfg, resolve=True)
     line = config["line"]
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    rank = int(os.environ.get("RANK", 0))
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    identity = process_identity()
+    world_size, rank, local_rank = identity.world_size, identity.rank, identity.local_rank
 
-    # Pin this process to its GPU BEFORE anything allocates: the data sources put
-    # their tensors on "cuda", which means device 0 on every rank unless the current
-    # device has already been set — a mismatch that only surfaces at the first
+    # Pin this process to its GPU BEFORE anything allocates: whatever is put on "cuda"
+    # (the model, the loader's batches) lands on device 0 on every rank unless the
+    # current device has already been set — a mismatch that only surfaces at the first
     # forward, hundreds of lines later.
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -133,9 +135,15 @@ def main(cfg: DictConfig) -> None:
     # --- 2. model: the same GPT + LMHead on every line -----------------------
     gpt_config = assembly.gpt_config_for(config, vocab)
     parallel = config.get("parallel", "ddp")
+    # How a batch becomes trunk inputs is chosen where the System is assembled: one
+    # sample per row, ordinary causal attention — every line.
+    # param_dtype: what parameters, gradients and AdamW moments are stored in (core's train_base.yaml, inherited
+    # through base.yaml): param_dtype=bf16 or fp32 on the command line switches it.
     setup = build_system(GPT, gpt_config, parallel=parallel,
                          head_ce=config.get("head_ce", "naive"),
-                         seed=config.get("seed", spec.SEED))
+                         seed=config.get("seed", spec.SEED),
+                         prepare_trunk_inputs_fn=prepare_unpacked_AR_trunk_inputs,
+                         param_dtype={"bf16": torch.bfloat16, "fp32": torch.float32}[config["param_dtype"]])
     system, rank, world_size = setup["system"], setup["rank"], setup["world_size"]
     # Same rule as modalities/text/train_text.py, decided here with world_size known:
     # per block under NanoDDP (a whole-trunk compile makes AOTAutograd finalize every
@@ -163,6 +171,11 @@ def main(cfg: DictConfig) -> None:
                                    config["device_batch_size"], rank, world_size)
 
     # --- 4. the ruler --------------------------------------------------------
+    # rank 0 of 1: every rank reads the WHOLE val stream and freezes the same batches;
+    # SupervisedCE evaluates this rank's shard of them and adds over the ranks, so the
+    # batches evaluated do not depend on the GPU count (the reading still moves by up
+    # to a few 1e-4 with the compute path: whole trunk or per block above, FSDP;
+    # evaluator.py).
     ecfg = config.get("evaluation") or {}
     val_loader = assembly.build_loader(line, config, vocab, "val", device,
                                        ecfg.get("batch", 8), rank=0, world_size=1)
@@ -173,7 +186,7 @@ def main(cfg: DictConfig) -> None:
     print0(f"\nruler   {evaluators[0].describe()}")
 
     # --- 5. run --------------------------------------------------------------
-    optimizers = create_optimizers(system, config["optimizer"], world_size=world_size)
+    optimizers = build_optimizers(system, config["optimizer"])
     ckpt_dir = config["checkpoint"].get("save_dir") or spec.ckpt_dir(line, config["model"]["depth"])
     config["checkpoint"]["save_dir"] = ckpt_dir
 

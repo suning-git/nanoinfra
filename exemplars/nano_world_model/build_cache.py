@@ -15,8 +15,8 @@ Every row of a given shape contract is exactly the same width, so the fix is to 
 compressing along that axis: one flat binary per field, `np.memmap`ed. Then
 `dataset[i]` is a slice at `i * row_bytes`, random access costs one page fault
 (~17KB), and the sampler is free to hand out a globally shuffled index stream.
-That is what lets core's ResumableDistributedSampler — whose entire state is
-{seed, epoch, index}, with no rank in it — drive video training.
+That is what lets core's ResumableDistributedSampler — whose position is
+{seed, epoch, index}, global, with no rank in it — drive video training.
 
 Size check, so nobody worries: 539k rows x 1280 codes x 2B = 1.4GB at the default
 contract, i.e. it lives in page cache.

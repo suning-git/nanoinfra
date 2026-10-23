@@ -8,10 +8,10 @@ optimizer state maps identically (behavior-preserving).
 
 import torch
 
-from core.utils import get_dist_info
+from core.utils import print0
 
 
-def build_optimizers(system, optimizer_config: dict, world_size: int = 1):
+def build_optimizers(system, optimizer_config: dict):
     """Two AdamW optimizers with role-based LR groups, built from an LMSystem.
 
     Groups by role, derived generically so ANY trunk works (not just the modern GPT):
@@ -32,7 +32,6 @@ def build_optimizers(system, optimizer_config: dict, world_size: int = 1):
 
     trunk, head = system.trunk, system.head
     model_dim = trunk.config.n_embd
-    rank, _, _, _ = get_dist_info()
 
     # Derived generically so any trunk satisfies it: embeddings (token / position /
     # type) take the embedding LR; every other trunk param (blocks, norms, ...) is a
@@ -49,9 +48,11 @@ def build_optimizers(system, optimizer_config: dict, world_size: int = 1):
 
     # Scale AdamW LRs ∝ 1/√dmodel (LRs were tuned for a 768-dim model).
     dmodel_lr_scale = (model_dim / 768) ** -0.5
-    if rank == 0:
-        print(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")
+    print0(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")
 
+    # eps and the fused kernel are fixed, not config: eps=1e-10 follows nanochat (it only acts on a parameter whose
+    # gradient scale nears it), and fused=True runs the same algorithm as the unfused implementations, faster, though
+    # not bit for bit (a different arithmetic order; for bf16 tensors it also keeps intermediates in fp32).
     adamw_kwargs = dict(betas=betas, eps=1e-10, weight_decay=weight_decay)
     adam_groups = [
         dict(params=unembedding_params, lr=unembedding_lr * dmodel_lr_scale),
@@ -59,9 +60,8 @@ def build_optimizers(system, optimizer_config: dict, world_size: int = 1):
     ]
     adamw_optimizer = torch.optim.AdamW(adam_groups, fused=True, **adamw_kwargs)
 
-    if rank == 0:
-        print(f"Using AdamW optimizer for matrix parameters "
-              f"(lr={adam_matrix_lr}, betas={betas}, wd={weight_decay})")
+    print0(f"Using AdamW optimizer for matrix parameters "
+           f"(lr={adam_matrix_lr}, betas={betas}, wd={weight_decay})")
     matrix_groups = [dict(params=matrix_params, lr=adam_matrix_lr * dmodel_lr_scale)]
     matrix_optimizer = torch.optim.AdamW(matrix_groups, fused=True, **adamw_kwargs)
 

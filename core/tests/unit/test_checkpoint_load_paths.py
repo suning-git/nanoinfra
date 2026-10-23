@@ -1,7 +1,7 @@
 """Two loaders, one intent each: `load_checkpoint_dcp` = weights + optimizer (a resume),
 `load_model_only` = weights (an init). No switch between them.
 
-Why this file exists (queue #10, 2026-09-10). `load_checkpoint_dcp` used to carry a
+Why this file exists (2026-09-10). `load_checkpoint_dcp` used to carry a
 `load_optimizer` flag whose default, False, selected a path that had never run: it
 handed `optimizers=None` to torch's get_state_dict, which rejects None. The first
 caller to try it (nano_t2v serve_compare, 2026-07-25) crashed and wrote its own

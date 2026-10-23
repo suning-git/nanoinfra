@@ -12,7 +12,7 @@ of the per-model curves, and reads the exponent a in N_opt ∝ C^a from it
 The ladder is embarrassingly parallel — one depth per GPU, no communication — so a
 pair of cards finishes it in about an hour. The fitting math is reused from
 exemplars/text_pretrain/scaling_fit.py; the study it belongs to is done and
-reproduces a ≈ 0.52, and none of it is reimplemented here.
+reproduced a ≈ 0.52 on its July curves (0.50 on the curves it ships now), and none of it is reimplemented here.
 
 WHY 500M PER SIZE, NOT 2B. The exemplar uses 2B so that every curve's bend AND its
 flattening are visible. Its own comment records that at 500M this pipeline

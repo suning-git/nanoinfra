@@ -14,11 +14,12 @@ ONE is new, and it is the only data code this project writes:
 
     video   VideoRowSource                      pre-encoded fixed-stride memmap
 
-All three satisfy core's DataSource contract — an infinite iterator of
-{tokens, token_types, attention_mask, loss_weights}, all [S] and padded — so
-MixedDataLoader mixes, stacks, shifts and checkpoints all three identically. The
-orchestrator passes SOURCE_TYPES as a LOCAL mapping, never a global registry
-(vision.md, "Config-driven switching is an orchestrator concern").
+All three satisfy core's DataSource contract — an infinite iterator of raw samples
+{tokens, token_types, supervision_mask}, each at its own length, no padding (core's
+data pipeline since 2026-10) — so MixedDataLoader mixes, prepares (next-token
+prediction), batches and checkpoints all three identically. The orchestrator passes
+SOURCE_TYPES as a LOCAL mapping, never a global registry: switching by config is the
+orchestrator's concern, not core's.
 
 A consequence worth knowing: because all three are ordinary DataSources, listing
 more than one under `data.sources` in a config trains ONE model on several
@@ -40,8 +41,9 @@ class VideoRowSource(DataSource):
     of one action id per game frame. Every row of a given clip length has the same
     width, so `row i` is a slice and random access costs a page fault — which is
     what lets core's ResumableDistributedSampler drive it, and what makes a run
-    checkpointed on 2 GPUs resume on 1 (its state is {seed, epoch, index}: three
-    integers with no rank in them).
+    checkpointed on 2 GPUs resume on 1 (its position {seed, epoch, index} is global,
+    with no rank in it; at each save the ranks' states are merged, with the rows
+    before it no rank has trained, so nothing is skipped or repeated).
 
     THE ROW. Codes and actions are interleaved into one flat sequence, then wrapped
     by the recipe exactly the way text and motion are wrapped:
@@ -53,18 +55,22 @@ class VideoRowSource(DataSource):
     sequence, shifted by one, identical in every respect to the text line. The
     interleaving is a property of the DATA, not of the model.
 
-    SUPERVISION. loss_weights is 0 on:
+    SUPERVISION. supervision_mask is False on:
       * the action tokens — they are the control INPUT; learning to predict which
         button a player presses is a different problem, and supervising it spends
         capacity on it;
       * the codes of L0 — frame 0 is the GIVEN observation, not a prediction.
-    and 1 on the remaining code positions plus the closing tag. That is the whole
-    mechanism: MixedDataLoader turns weight-0 positions into IGNORE_INDEX targets,
-    and the fused cross-entropy already honours ignore_index. The motion line
-    expresses "supervise the motion half only" through the identical field.
+    and True on the remaining code positions plus the closing tag. That is the whole
+    mechanism: the loader's next-token preparation turns unsupervised tokens into
+    IGNORE_INDEX targets, and the fused cross-entropy already honours ignore_index.
+    The motion line expresses "supervise the motion half only" through the identical
+    field.
     """
 
     def __init__(self, config: Dict[str, Any], tokenizers: Dict):
+        if "sequence_len" in config:
+            raise KeyError("VideoRowSource: `sequence_len` is now `sample_len`, the raw tokens per row "
+                           "(T + 1 for rows of T positions)")
         import json
         from pathlib import Path
 
@@ -78,7 +84,7 @@ class VideoRowSource(DataSource):
         self._layout = tokenizers["layout"]
         self._resolver = tokenizers["control_resolver"]
         self.split = config.get("split", "train")
-        self.sequence_len = int(config["sequence_len"])
+        self.sample_len = int(config["sample_len"])
 
         cache = Path(config["cache"])
         meta = json.loads((cache / "meta.json").read_text())
@@ -133,38 +139,45 @@ class VideoRowSource(DataSource):
             {"video_tokens": field_len}, self._layout, self._resolver,
             field_dummy_ids={"video_tokens": self.v_off})
         row_len = int(fixed["token_template"].numel())
-        if row_len != self.sequence_len:
+        if row_len != self.sample_len:
             raise ValueError(
-                f"video row is {row_len} tokens but sequence_len={self.sequence_len}. "
-                f"It is DERIVED from the clip (spec.video_shape), not configured — "
-                f"leave sequence_len: null in the yaml.")
+                f"video row is {row_len} tokens but sample_len={self.sample_len}. The line's "
+                f"sequence_len (row_len - 1 positions) is DERIVED from the clip "
+                f"(spec.video_shape), not configured — leave sequence_len: null in the yaml.")
         f0, f1 = fixed["field_slices"]["video_tokens"]
         self._field = (f0, f1)
 
         # --- supervision, written once -------------------------------------
         # 1 on the code positions of the PREDICTED latent frames, plus the closing
         # video_end tag; 0 on the given frame, on every action token, and on the
-        # delimiters. Ported from exemplars/nano_world_model/autoregressive.py,
-        # which states the reasons: the given frame is the observation, and the
+        # delimiters. The reasons: the given frame is the observation, and the
         # actions are the control INPUT — learning which button a player presses is
         # a different problem that would spend capacity on it.
-        lw = np.zeros(row_len, dtype=np.float32)
-        lw[f0 + np.asarray(predicted)] = 1.0
-        lw[f1] = 1.0                                   # video_end
-        self.n_supervised = int(lw.sum())
+        sm = np.zeros(row_len, dtype=bool)
+        sm[f0 + np.asarray(predicted)] = True
+        sm[f1] = True                                  # video_end
+        self.n_supervised = int(sm.sum())
         assert self.n_supervised == n_blocks * cpf + 1
 
-        dev = config.get("device", "cuda")
-        if dev == "cuda" and not torch.cuda.is_available():
-            dev = "cpu"
-        self.device = torch.device(dev)
+        # The loader prepares and batches on the CPU and moves whole batches to the
+        # training device (core's data pipeline): a source yields CPU
+        # tensors unless its config asks otherwise.
+        self.device = torch.device(config.get("device", "cpu"))
         self._template = fixed["token_template"].numpy().copy()
-        self._types = fixed["token_types"].to(self.device)
-        self._attn = torch.ones(row_len, dtype=torch.long, device=self.device)
-        self._lw = torch.from_numpy(lw).to(self.device)
+        # The field holds video codes AND action ids, so the fixed layout (one dummy ID per field, video here) types
+        # the action slots as video. Type a representative row instead: an action id on every action slot.
+        typing_row = fixed["token_template"].clone()
+        typing_row[f0 + torch.from_numpy(self._action_slots)] = self.a_off
+        self._types = self._layout.classify_token_types(typing_row).to(self.device)
+        self._sm = torch.from_numpy(sm).to(self.device)
 
         self._sampler = ResumableDistributedSampler(self.codes,
                                                     seed=int(config.get("seed", 0)))
+        if "rank" in config:
+            # The share this source reads, when the config says (resolve_sources does: the process's own for
+            # training, rank 0 of 1 for the validation set every rank freezes whole). Otherwise the sampler's
+            # default, the launcher's process.
+            self._sampler.rank, self._sampler.world_size = int(config["rank"]), int(config["world_size"])
         rs = config.get("resume_state")
         if rs:
             self._sampler.load_state_dict(rs)
@@ -188,11 +201,10 @@ class VideoRowSource(DataSource):
         import numpy as np
         while True:
             for i in self._sampler:
-                yield {
+                yield {                                # every row is full: no padding, no attention_mask
                     "tokens": torch.from_numpy(self._row(i)).to(self.device),
                     "token_types": self._types,        # shared (read-only)
-                    "attention_mask": self._attn,      # shared (read-only)
-                    "loss_weights": self._lw,          # shared (read-only)
+                    "supervision_mask": self._sm,      # shared (read-only)
                 }
 
     def get_state(self) -> Optional[Dict[str, Any]]:
@@ -200,6 +212,9 @@ class VideoRowSource(DataSource):
 
     def set_state(self, state: Dict[str, Any]) -> None:
         self._sampler.load_state_dict(state)
+
+    def merge_rank_states(self, states):
+        return self._sampler.merge_rank_states(states)
 
     def __repr__(self) -> str:
         s = self._sampler.state_dict()
@@ -209,9 +224,9 @@ class VideoRowSource(DataSource):
 def source_types() -> Dict[str, type]:
     """The local string->class mapping MixedDataLoader resolves `type:` against.
 
-    A LOCAL parameter, not a global registry — vision.md's "config-driven switching
-    is an orchestrator concern", and its cautionary example is a project that
-    mutated a framework-level global to get exactly this.
+    A LOCAL parameter, not a global registry: switching by config is the orchestrator's
+    concern, and a project that mutates a framework-level global to get exactly this
+    changes every other user of the framework without saying so.
 
     Imports are lazy and failures are tolerated per entry, so a text-only run never
     needs the motion package (numpy converters, and the SMPL body model on the

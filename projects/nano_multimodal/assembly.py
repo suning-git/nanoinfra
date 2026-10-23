@@ -1,7 +1,7 @@
 """
 assembly.py — line name -> everything a run needs. The ONE path into the data.
 
-WHY THIS IS NOT INSIDE train.py. vision.md says orchestrators own assembly, and
+WHY THIS IS NOT INSIDE train.py. Orchestrators own assembly (core's design), and
 train.py IS the orchestrator — but assembly has a SECOND legitimate consumer: the
 data browser (serve/browse.py), which must show the batches training actually
 sees. If the browser assembled its own loader, the two would be free to drift, and
@@ -21,6 +21,7 @@ Read build_layout_for_line() first — it is where the project's one idea lives.
 """
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -35,7 +36,9 @@ import modalities.text                                       # noqa: E402
 from modalities.assembler import Modality, build_layout      # noqa: E402
 from modalities.control import CONTROL_TOKENS, make_control_resolver  # noqa: E402
 
+from core.data.batchers import PaddingBatcher                # noqa: E402
 from core.data.mixed_dataloader import MixedDataLoader       # noqa: E402
+from core.data.supervision import build_NTP_supervised_sample  # noqa: E402
 from core.model.gpt import GPTConfig                         # noqa: E402
 from core.tokenization.vocab_layout import VocabLayout       # noqa: E402
 from core.utils import print0                                # noqa: E402
@@ -124,7 +127,7 @@ class Vocab:
     resolver: Any                      # control name -> global id, in THIS line's layout
     tokenizers: Dict[str, Any]         # the shared bag every DataSource receives
     widths: Dict[str, int]
-    sequence_len: int
+    sequence_len: int                  # T, positions per row; a source sample is up to T + 1 raw tokens
 
     @property
     def active(self) -> List[str]:
@@ -353,7 +356,8 @@ def assemble_vocab(line: str, config: Dict[str, Any]) -> Vocab:
     seq = config.get("sequence_len")
     if seq is None:
         assert line == "video", "only the video line derives its sequence_len"
-        seq = spec.video_shape(config["clip"]["frames"], config["clip"]["res"])["row_len"]
+        # a video row of row_len tokens trains as row_len - 1 positions (the next-token shift)
+        seq = spec.video_shape(config["clip"]["frames"], config["clip"]["res"])["row_len"] - 1
 
     tokenizers: Dict[str, Any] = {"layout": layout, "control_resolver": resolver}
     if tokenizer is not None:
@@ -372,8 +376,8 @@ def resolve_sources(config, vocab: Vocab, split: str, device: str,
     """Source DECLARATIONS -> concrete source configs.
 
     Turns the recipe NAME into the recipe dict, fills in per-run facts
-    (sequence_len, device, rank), and resolves the text line's file list through
-    modalities.text.datasets — where splits are declared, never inferred from a
+    (sample_len = sequence_len + 1 raw tokens, or max_sample_len for t2m; device, rank), and resolves the
+    text line's file list through modalities.text.datasets — where splits are declared, never inferred from a
     directory listing.
 
     `split` picks between the config's `sources` (train) and `val_sources` (val).
@@ -397,8 +401,13 @@ def resolve_sources(config, vocab: Vocab, split: str, device: str,
             raise KeyError(f"unknown recipe {name!r}; declared: {sorted(recipes)}")
         sc["recipe_name"] = name
         sc["recipe"] = recipes[name]
-        sc.setdefault("sequence_len", vocab.sequence_len)
-        sc.setdefault("device", device)
+        length_key = "max_sample_len" if sc["type"] == "t2m" else "sample_len"
+        if "sequence_len" in sc:
+            raise KeyError(f"a {sc['type']} source declares `sequence_len`; it takes `{length_key}` (raw tokens "
+                           f"{'a pair may take' if sc['type'] == 't2m' else 'per sample'}, default the line's "
+                           f"sequence_len + 1)")
+        sc.setdefault(length_key, vocab.sequence_len + 1)
+        sc.setdefault("device", "cpu")     # sources yield CPU samples; the loader moves whole batches
         sc.setdefault("seed", config.get("seed", spec.SEED))
         sc.setdefault("rank", rank)
         sc.setdefault("world_size", world_size)
@@ -415,13 +424,20 @@ def build_loader(line: str, config: Dict[str, Any], vocab: Vocab, split: str,
     train.py and serve/browse.py both come through here."""
     from projects.nano_multimodal.sources import source_types
 
+    from modalities.text.streams import ntp_pad_values
+
     sources = resolve_sources(config, vocab, split, device, rank, world_size)
-    loader_config = {
-        "batch_size": batch_size,
-        "data": {"sequence_len": vocab.sequence_len, "sources": sources},
-    }
-    return MixedDataLoader(loader_config=loader_config, tokenizers=vocab.tokenizers,
-                           source_types=source_types(), resume_state_dict=None)
+    loader_config = {"data": {"sources": sources}}
+    # Each raw sample is prepared for next-token prediction (L + 1 tokens -> L positions,
+    # unsupervised tokens -> IGNORE targets), one sample per row (PaddingBatcher,
+    # batch_size rows of sequence_len positions, padding with eos and IGNORE), and the
+    # batch is moved to `device` in one copy per field.
+    return MixedDataLoader.from_config(
+        loader_config, vocab.tokenizers, source_types(),
+        build_supervised_sample_fn=build_NTP_supervised_sample,
+        create_batcher_fn=partial(PaddingBatcher, shape=(batch_size, vocab.sequence_len),
+                                  pad_values=ntp_pad_values(vocab.layout, vocab.resolver)),
+        device=device)
 
 
 def gpt_config_for(config: Dict[str, Any], vocab: Vocab) -> GPTConfig:

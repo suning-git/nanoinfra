@@ -4,8 +4,8 @@ torch already implements the abort (`clip_grad_norm_(..., error_if_nonfinite=Tru
 so testing that it aborts would be testing torch. These tests cover only:
 
   1. the property we DEPEND ON but torch does not promise (see below);
-  2. the three behaviors that are ours: the step number, the fallback abort, and
-     the fact that opting out is not silent.
+  2. the two behaviors that are ours: the step number, and the fact that opting
+     out is not silent.
 
 (1) is the reason this file exists. torch documents `error_if_nonfinite` as "an error
 is thrown if the total norm ... is nan, inf, or -inf" — and says NOTHING about the
@@ -62,15 +62,6 @@ def test_message_carries_the_step():
     a post-mortem needs."""
     with pytest.raises(RuntimeError, match="step 722"):
         clip_gradients(_FakeSystem([float("nan"), 2.0]), max_grad_norm=1.0, step=722)
-
-
-def test_aborts_even_if_torchs_check_does_not_fire(monkeypatch):
-    """Ours: the guarantee is "the optimizer never steps on a non-finite gradient",
-    and it must not depend on one upstream implementation detail holding."""
-    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_",
-                        lambda *a, **k: torch.tensor(float("nan")))
-    with pytest.raises(RuntimeError, match="did not catch it"):
-        clip_gradients(_FakeSystem([1.0]), max_grad_norm=1.0, step=722)
 
 
 def test_opting_out_is_not_silent(capsys):

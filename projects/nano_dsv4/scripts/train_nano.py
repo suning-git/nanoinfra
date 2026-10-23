@@ -36,12 +36,14 @@ sys.path.insert(0, str(PROJ))
 
 import modalities.text
 from modalities.text.train_text import SOURCE_TYPES, assemble_vocab
-from modalities.text.streams import build_evaluators, report, resolve_sources
+from modalities.text.streams import build_evaluators, make_text_loader, report, resolve_sources
 from modalities.text import TextEvaluator, get_tokenizer
-from core.training.model_setup import build_system, compile_system_trunk, print0
-from core.training.trainer import Trainer, create_optimizers
+from core.training.model_setup import build_system, compile_system_trunk
+from core.utils import print0, set_torch_global_defaults
+from core.training.optim import build_optimizers
+from core.training.trainer import Trainer
 from core.model.gpt import GPT, GPTConfig
-from core.data.mixed_dataloader import MixedDataLoader
+from core.model.system import prepare_unpacked_AR_trunk_inputs
 
 from arch.nano_dsv4 import NanoDSV4, NanoDSV4Config
 
@@ -121,6 +123,8 @@ def _wire_router_step(system, optimizers):
 
 
 def main():
+    # Process-wide PyTorch settings (CUDA allocator, TF32) are the entry's to make, before anything uses CUDA.
+    set_torch_global_defaults()
     ap = argparse.ArgumentParser()
     ap.add_argument("--arch", required=True, choices=["dsv4", "gpt"])
     ap.add_argument("--max-steps", type=int, default=-1)
@@ -132,6 +136,9 @@ def main():
     ap.add_argument("--gpt-depth", type=int, default=12)
     ap.add_argument("--gpt-dim", type=int, default=768)
     ap.add_argument("--gpt-heads", type=int, default=6)
+    ap.add_argument("--param-dtype", choices=["bf16", "fp32"], default=None,
+                    help="what parameters, gradients and AdamW moments are stored in (default: core's train_base.yaml); "
+                         "this architecture reads some weights outside autocast, so it changes the arithmetic too")
     ap.add_argument("--dry", action="store_true", help="build + param count + one timed fwd/bwd, no training")
     ap.add_argument("--raw-ruler", action="store_true",
                     help="also measure val/text_ce_raw, the pre-2026-07-26 ruler "
@@ -151,6 +158,8 @@ def main():
         f"checkpoint.save_every={args.save_every}",
         f"checkpoint.save_dir=${{oc.env:NANOINFRA_BASE_DIR,./outputs}}/checkpoints/{name}",
     ]
+    if args.param_dtype:
+        overrides.append(f"param_dtype={args.param_dtype}")
     with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
         cfg = compose(config_name="train_text", overrides=overrides)
     config = OmegaConf.to_container(cfg, resolve=True)
@@ -161,16 +170,18 @@ def main():
                                          gpt_depth=args.gpt_depth, gpt_dim=args.gpt_dim,
                                          gpt_heads=args.gpt_heads)
     setup = build_system(trunk_cls, trunk_config,
-                         # "compiled", not "liger": this file ships in the public
-                         # repo, where liger is an optional extra. The exemplars pin
-                         # liger because their recorded numbers came from it and so
-                         # they are entitled to demand it; this line has no such debt,
-                         # and compiled needs no extra package, is faster at every
-                         # depth measured, and is the arm numerically closest to
-                         # naive. (There is no "auto" to fall back through, by
-                         # design — see build_system's head_ce docstring.)
+                         # "compiled", as the exemplars pin it: it needs no extra
+                         # package (liger is an optional extra in the public repo),
+                         # is faster at every depth measured, and is the arm
+                         # numerically closest to naive. (There is no "auto" to fall
+                         # back through, by design — see build_system's head_ce
+                         # docstring.)
                          head_ce="compiled",
-                         seed=config.get("seed", 42))
+                         seed=config.get("seed", 42),
+                         # how a batch becomes trunk inputs, chosen where the System is assembled: one window
+                         # per row, ordinary causal attention, as the text pipeline batches it
+                         prepare_trunk_inputs_fn=prepare_unpacked_AR_trunk_inputs,
+                         param_dtype={"bf16": torch.bfloat16, "fp32": torch.float32}[config["param_dtype"]])
     system = setup["system"]
     if args.arch == "gpt":
         # build_system does not compile the trunk; the dense GPT takes the whole trunk
@@ -194,14 +205,12 @@ def main():
 
         system.loss = loss_with_aux
 
-    sources = resolve_sources(config["data"], args.seq_len, device="cuda")
+    # The text pipeline's loader, as modalities/text/train_text.py builds it: sources on the CPU, each window
+    # prepared for next-token prediction, one per row, whole batches moved to the GPU.
+    sources = resolve_sources(config["data"], args.seq_len, device="cpu")
     tokenizers = {"text": tokenizer, "layout": layout, "control_resolver": resolver}
-    dataloader = MixedDataLoader(
-        loader_config={"batch_size": args.device_batch_size,
-                       "data": {"sequence_len": args.seq_len, "sources": sources}},
-        tokenizers=tokenizers,
-        source_types=SOURCE_TYPES, resume_state_dict=None,
-    )
+    dataloader = make_text_loader({"data": {"sources": sources}}, tokenizers, SOURCE_TYPES,
+                                  batch_size=args.device_batch_size, sequence_len=args.seq_len, device="cuda")
 
     if args.dry:
         system.train()
@@ -220,7 +229,7 @@ def main():
         print0(f"[dry] est FLOPs/token={flops/1e6:.1f}M  tokens/microbatch={tok}")
         return
 
-    optimizers = create_optimizers(system, config["optimizer"], world_size=setup["world_size"])
+    optimizers = build_optimizers(system, config["optimizer"])
     _wire_router_step(system, optimizers)
 
     if args.max_steps > 0:
@@ -236,7 +245,7 @@ def main():
 
     trainer = Trainer(system=system, optimizers=optimizers, dataloader=dataloader,
                       config=config, rank=setup["rank"], world_size=setup["world_size"],
-                      debug_tokenizer=tokenizer, evaluators=evaluators)
+                      evaluators=evaluators)
     print0(f"Starting {name}: arch={args.arch} steps={trainer.max_steps} "
            f"seq={args.seq_len} dbs={args.device_batch_size}")
     trainer.train()

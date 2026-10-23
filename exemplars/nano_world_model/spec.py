@@ -155,8 +155,8 @@ SEED = 42
 DEVICE_BATCH_SIZE = 4    # rows per GPU per micro-step
 TOTAL_BATCH_ROWS = 4     # rows per optimizer step (grad_accum = this / (bs * world))
 
-# Masked-diffusion noise schedule. t is clipped away from 0 because the MDLM 1/t
-# weight has unbounded gradient variance as t -> 0 (BD3-LM §4).
+# Masked-diffusion noise schedule. t is clipped away from 0 because the unclipped
+# schedule has enormous gradient variance (BD3-LM §4).
 T_MIN = 0.2
 T_MAX = 1.0
 

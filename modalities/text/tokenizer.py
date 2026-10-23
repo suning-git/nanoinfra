@@ -497,9 +497,6 @@ def get_tokenizer():
 def get_token_bytes(device="cpu"):
     from core.utils import get_base_dir
 
-    if str(device).startswith("cuda") and not torch.cuda.is_available():
-        device = "cpu"
-
     tokenizer_dir = os.environ.get("NANOINFRA_TOKENIZER_DIR") or os.path.join(get_base_dir(), "tokenizer")
     token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
     # A missing table used to become a ones table under a WARNING, so downstream

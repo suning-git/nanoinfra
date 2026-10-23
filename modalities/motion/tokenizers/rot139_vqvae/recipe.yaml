@@ -1,5 +1,5 @@
 # rot139_vqvae — the recipe that reproduces this tokenizer.
-# ⚠ BEST-EFFORT (research-origin): the report.md checkpoint records feature-MSE
+# ⚠ BEST-EFFORT (research-origin): the original report's checkpoint records feature-MSE
 # training (no kin loss) over >=5k steps but does NOT pin exact steps/lr. These
 # values reproduce the FAMILY faithfully (plain feature-MSE VQ on AMASS); the
 # original weights in models/motion/ are the reference. See card.md.

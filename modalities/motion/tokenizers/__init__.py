@@ -1,5 +1,5 @@
 """
-motion.tokenizers — the classic-tokenizer SHELF (R7, 2026-07-07).
+motion.tokenizers — the classic-tokenizer SHELF (2026-07-07).
 
 Layout:
   <recipe>/     a tokenizer = a self-serve FAÇADE (thin load()/train()) + recipe

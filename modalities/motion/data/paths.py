@@ -69,9 +69,8 @@ PROCESSED_DIR = os.path.join(BASE, "motion_caches")
 
 DEFAULT_SPEC = "rot139"                                # the standard feature spec
 
-# rot139 format-version root (D7.1): datasets/<name>/rot139/<split>.npz. R6c relocates
-# the .npz files here + leaves symlinks at the old processed/ path; until then
-# format_file() falls back to processed/ so nothing breaks.
+# rot139 format-version root: datasets/<name>/rot139/<split>.npz, a format version's one home
+# (processed_file).
 def _format_dir(source: str, spec: str) -> str:
     return os.path.join(DATASETS, source, spec)
 

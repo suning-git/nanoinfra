@@ -3,6 +3,16 @@
 Reference numbers, so you can tell whether your run is training or broken.
 RTX 5090, 12 layers / 768 dim / 12 heads (0.14B), sequence length 256.
 
+> **Storage precision.** These numbers were measured with the parameters, their gradients and the AdamW moments
+> stored in bf16, core's only storage when they ran (code up to v0.2.0). Training now stores them in fp32 by default
+> (the `param_dtype` config key; the arithmetic stays under bf16 autocast), so a run on current code differs from them
+> a little in the first minute and more over a long run. `param_dtype=bf16` returns to the storage they used; to
+> reproduce them exactly, use v0.2.0.
+
+> **Head.** These numbers were measured with `head_ce=liger`. The entry pins `compiled` since 2026-10-22, the
+> fastest arm: on one RTX 5090, 35 -> 23 ms a step, peak memory 3.50 -> 3.53 GiB; one 300-step run each (LAFAN1
+> padding and packing, HumanML3D) read within 0.003 of each other at step 299.
+
 ## Is the pipeline alive? (a minute)
 
 After `data/encode.py`, on a small LAFAN1 cache:

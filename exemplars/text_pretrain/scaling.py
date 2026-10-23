@@ -19,8 +19,11 @@ Deliberate choices:
     and the smallest and largest sizes never share a compute budget (RESULTS §2).
   * The SAME Orchestrator as pretrain (not a hand-rolled loop) — the scaling law
     characterises the real training loop, and rides the same snapshot guard.
-  * ONE shared LR (the champion's 3e-4) across sizes — fine for the frontier's
-    shape at this scale; a precision study would tune LR per size.
+  * ONE shared LR across sizes, 3e-4, with the compiled head (LR_MAX, HEAD_CE
+    below), pinned HERE rather than read from spec.py, whose champion recipe has
+    since moved on. The shipped curves were measured with the liger head; the
+    study moved to compiled on 2026-10-22, the fastest arm. Fine for the
+    frontier's shape at this scale; a precision study would tune LR per size.
 
 WHY curves + frontier (not a 2D grid + parametric fit): the frontier IS the
 compute-optimal object — at each compute budget several sizes compete and the
@@ -30,6 +33,9 @@ Run — split the depths across both GPUs, then collect + fit + plot:
   CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m exemplars.text_pretrain.scaling run --depths 8 6
   CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m exemplars.text_pretrain.scaling run --depths 4 3 2
   .venv/bin/python -m exemplars.text_pretrain.scaling fit   # -> outputs/scaling.json + .png
+`run --param-dtype` / `fit --param-dtype` pick the storage of parameters, gradients and AdamW moments; both default to
+fp32, the storage the shipped curves were measured in (and core's default), so that a reproduction is compared like
+with like (bf16 storage gives different curves). Each storage has its own shards, and a fit takes one storage's curves.
 """
 import argparse
 import glob
@@ -61,6 +67,9 @@ EXAMPLE = HERE / "example_results"   # read-only here: `fit` compares against it
 
 DEPTHS = [2, 3, 4, 6, 8]            # model sizes N (non-embedding params)
 SEQ_LEN, DBS, TBS = 1024, 32, 32768
+LR_MAX, HEAD_CE = "3e-4", "compiled"   # NOT the champion's recipe (spec.py). compiled since
+                                       #   2026-10-22; the shipped curves were measured with liger
+                                       #   (RESULTS §2), and `fit` prints which arm each side used.
 MAX_TOKENS = 2_000_000_000          # per size. EVERY size gets the same fixed budget ON
                                     #   PURPOSE: small models saturate to their floor while big
                                     #   ones still descend — that is what makes the curves cross
@@ -154,13 +163,14 @@ def eval_schedule(max_steps, n=N_EVALS, first=20):
     return [int(x) for x in s]
 
 
-def run_curve(depth):
+def run_curve(depth, param_dtype="fp32"):
     """One constant-LR run to MAX_TOKENS through the Orchestrator; return its
     (compute, val) trajectory parsed from the log-scheduled evaluations."""
     N = n_nonembed(depth)
     max_steps = int(MAX_TOKENS // TBS)
     steps = eval_schedule(max_steps)
-    ov = spec.train_overrides(depth=depth, **{
+    ov = spec.train_overrides(depth=depth, lr=LR_MAX, **{
+        "head_ce": HEAD_CE,
         "sequence_len": SEQ_LEN, "device_batch_size": DBS, "total_batch_size": TBS,
         "max_steps": max_steps,
         "optimizer.scheduler.warmup_steps": WARMUP_STEPS,   # budget-invariant by construction
@@ -170,6 +180,7 @@ def run_curve(depth):
         "evaluation.eval_at": "[" + ",".join(map(str, steps)) + "]",
         "evaluation.eval_tokens": EVAL_TOKENS,
         "logging.log_every": 200,
+        "param_dtype": param_dtype,
     })
     log = OUT / f"curve_d{depth}.log"
     print(f"[run ] d{depth} N={N/1e6:.1f}M -> {MAX_TOKENS/1e6:.0f}M tokens "
@@ -194,42 +205,55 @@ def run_curve(depth):
         raise SystemExit(f"curve d{depth} FAILED (rc={rc}, {len(traj)} evals) — see {log}")
     print(f"[done] d{depth}: {len(traj)} eval points, val {traj[0]['val']:.3f} -> {traj[-1]['val']:.3f}",
           flush=True)
-    return {"depth": depth, "N": N, "trajectory": traj}
+    return {"depth": depth, "N": N, "param_dtype": param_dtype, "head_ce": HEAD_CE, "trajectory": traj}
+
+
+def _ours(curve, param_dtype):
+    """A curve this study may resume from or fit: the same storage and the same head CE. A curve that records no
+    head_ce (written before 2026-10-22, when the study pinned liger) is not taken for any arm."""
+    return curve.get("param_dtype", "bf16") == param_dtype and curve.get("head_ce") == HEAD_CE
 
 
 def cmd_run(args):
     """Train one curve per depth (one GPU). Per-shard JSON, resumable."""
-    shard = OUT / f"curves_{'-'.join(map(str, args.depths))}.json"
+    shard = OUT / f"curves_{'-'.join(map(str, args.depths))}_{args.param_dtype}_{HEAD_CE}.json"
     curves = json.loads(shard.read_text())["curves"] if shard.exists() else []
+    curves = [c for c in curves if _ours(c, args.param_dtype)]
     done = {c["depth"] for c in curves}
     for d in args.depths:
         if d in done:
             print(f"[skip] d{d}", flush=True)
             continue
-        curves.append(run_curve(d))
+        curves.append(run_curve(d, args.param_dtype))
         shard.write_text(json.dumps({"curves": curves}, indent=2))
     print(f"WROTE {shard} ({len(curves)} curves)")
 
 
 def cmd_fit(args):
     """Merge shards, fit the frontier exponent, write scaling.json + the figure."""
-    by_depth = {}
+    by_depth, others = {}, 0
     for f in sorted(glob.glob(str(OUT / "curves_*.json"))):
         for c in json.loads(Path(f).read_text())["curves"]:
-            by_depth[c["depth"]] = c
+            if _ours(c, args.param_dtype):   # storage from before its key: bf16, all there was
+                by_depth[c["depth"]] = c
+            else:
+                others += 1
     if not by_depth and (OUT / "scaling.json").exists():   # re-plot from YOUR last fit
         for c in json.loads((OUT / "scaling.json").read_text()).get("curves", []):
-            by_depth[c["depth"]] = c
+            if _ours(c, args.param_dtype):
+                by_depth[c["depth"]] = c
+    if others:
+        print(f"(left out {others} curves of another storage or head_ce, or recording no head_ce)")
     curves = sorted(by_depth.values(), key=lambda c: c["N"])
     if len(curves) < 3:
-        raise SystemExit(f"only {len(curves)} curves found — run the study first")
+        raise SystemExit(f"only {len(curves)} {args.param_dtype} / {HEAD_CE} curves found — run the study first")
     a = scaling_fit.frontier_exponent(curves)
     print(f"compute-optimal frontier exponent a = {a:.3f}   (Chinchilla ~0.5)"
           if a else "frontier exponent: undetermined (need >=2 sizes competing)")
     out = {"study": {"depths": DEPTHS, "seq_len": SEQ_LEN, "total_batch_size": TBS,
-                     "max_tokens": MAX_TOKENS, "lr_max": spec.LR_MAX, "lr_schedule": "constant",
+                     "max_tokens": MAX_TOKENS, "lr_max": LR_MAX, "head_ce": HEAD_CE, "lr_schedule": "constant",
                      "eval_schedule": f"{N_EVALS} log-spaced from step 20",
-                     "eval_tokens": EVAL_TOKENS},
+                     "eval_tokens": EVAL_TOKENS, "param_dtype": args.param_dtype},
            "a_frontier": a, "curves": curves}
     (OUT / "scaling.json").write_text(json.dumps(out, indent=2))
     _plot(curves, a)
@@ -260,6 +284,13 @@ def _compare_to_example(curves, a):
     ref_curves = r.get("curves", [])
     ra, rc = r.get("a_frontier"), {c["depth"]: c for c in ref_curves}
     print(f"\n  vs {ref.relative_to(HERE)} (the run this exemplar ships):")
+    theirs_dtype = r.get("study", {}).get("param_dtype", "bf16")   # shipped before the key: bf16, all there was
+    mine_dtype = curves[0].get("param_dtype", "bf16") if curves else theirs_dtype
+    print(f"    storage         example {theirs_dtype}   yours {mine_dtype}"
+          + ("" if mine_dtype == theirs_dtype else "   (different: the curves are not comparable)"))
+    theirs_ce = r.get("study", {}).get("head_ce", "unrecorded")    # shipped before the key: not recorded
+    print(f"    head_ce         example {theirs_ce}   yours {HEAD_CE}"
+          + ("" if theirs_ce == HEAD_CE else "   (different arms: the numbers differ a little)"))
     if a and ra:
         print(f"    a_frontier      example {ra:.4f}   yours {a:.4f}   ({a - ra:+.4f})")
     for c in curves:
@@ -269,12 +300,13 @@ def _compare_to_example(curves, a):
         mine, theirs = c["trajectory"][-1], o["trajectory"][-1]
         print(f"    val CE @ d{c['depth']:<3}    example {theirs['val']:.4f}   "
               f"yours {mine['val']:.4f}   ({mine['val'] - theirs['val']:+.4f})")
+        if "bpb" in mine and "bpb" in theirs:   # bits per byte survives a tokenizer change
+            print(f"    val bpb @ d{c['depth']:<3}   example {theirs['bpb']:.4f}   "
+                  f"yours {mine['bpb']:.4f}   ({mine['bpb'] - theirs['bpb']:+.4f})")
     print("    (CE is per-token: comparable only within ONE tokenizer artifact. "
           "The exponent is the part that should reproduce.)")
-    # Be explicit about what is NOT on offer. The shipped reference predates bpb
-    # collection, so on a re-trained BPE the only level comparison available here
-    # is the one that does not survive a tokenizer change. Saying so beats letting
-    # a reader draw conclusions from the CE column we just told them to distrust.
+    # A reference from before bpb collection has none: say so, rather than letting
+    # a reader lean on the CE column just called untrustworthy.
     if not any("bpb" in p for c in ref_curves for p in c.get("trajectory", [])):
         print("    (The shipped reference predates val/bpb, so no byte-normalised "
               "comparison is possible against it — yours records bpb for the next one.)")
@@ -337,8 +369,12 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="train one curve per given depth (one GPU)")
     r.add_argument("--depths", type=int, nargs="+", required=True)
+    r.add_argument("--param-dtype", choices=["bf16", "fp32"], default="fp32",
+                   help="storage of parameters, gradients and AdamW moments (default fp32: what the shipped curves used)")
     r.set_defaults(func=cmd_run)
     f = sub.add_parser("fit", help="merge curves, fit the frontier, write scaling.json + figure")
+    f.add_argument("--param-dtype", choices=["bf16", "fp32"], default="fp32",
+                   help="which storage's curves to fit (default fp32: what the shipped curves used)")
     f.set_defaults(func=cmd_fit)
     args = ap.parse_args()
     args.func(args)

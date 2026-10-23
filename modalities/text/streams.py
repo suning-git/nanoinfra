@@ -26,9 +26,14 @@ the way a project-side ``--raw-ruler`` migration bridge does.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any, Dict, List
 
+import torch
+
+from core.data.batchers import PaddingBatcher
 from core.data.mixed_dataloader import MixedDataLoader
+from core.data.supervision import IGNORE, build_NTP_supervised_sample
 
 from modalities.text.datasets import describe, resolve_split
 from modalities.text.evaluator import TextEvaluator
@@ -44,12 +49,16 @@ def _recipe(data_cfg: Dict[str, Any], name):
     return recipes[name]
 
 
-def resolve_sources(data_cfg, sequence_len, device='cuda') -> List[Dict[str, Any]]:
-    """Training source declarations -> concrete source configs (files + recipe resolved)."""
+def resolve_sources(data_cfg, sequence_len, device='cpu') -> List[Dict[str, Any]]:
+    """Training source declarations -> concrete source configs (files + recipe resolved). `sequence_len` is T, the
+    positions per row; each source reads `sample_len` raw tokens per window, T + 1 unless it declares its own."""
     out = []
     for sc in data_cfg['sources']:
         sc = dict(sc)
-        sc.setdefault('sequence_len', sequence_len)
+        if 'sequence_len' in sc:
+            raise KeyError("a text source declares `sequence_len`; it is now `sample_len` (raw tokens per window, "
+                           "default sequence_len + 1)")
+        sc.setdefault('sample_len', sequence_len + 1)
         sc.setdefault('device', device)
         if 'files' not in sc:
             sc['files'] = resolve_split(data_cfg, sc['dataset'], sc['split'])
@@ -57,6 +66,27 @@ def resolve_sources(data_cfg, sequence_len, device='cuda') -> List[Dict[str, Any
         sc['recipe'] = _recipe(data_cfg, sc.get('recipe'))
         out.append(sc)
     return out
+
+
+def ntp_pad_values(layout, control_resolver) -> Dict[str, int]:
+    """Pad values for next-token-prediction samples of the assembled vocab: idx is padded with `eos` (a real
+    token, as the motion sources always padded), its type with eos's type, targets with IGNORE. Text windows are
+    always full, so they meet these only in a finite stream's tail batch; a pad position is never a target and
+    never read by a real position (doc_id = -1 marks it)."""
+    eos = control_resolver.resolve('eos')
+    eos_type = int(layout.classify_token_types(torch.tensor([eos]))[0])
+    return {'idx': eos, 'targets': IGNORE, 'token_types': eos_type, 'target_types': eos_type}
+
+
+def make_text_loader(loader_config, tokenizers, source_types, *, batch_size, sequence_len, device='cuda'):
+    """The text pipeline's MixedDataLoader: sources on the CPU (their configs say so), each raw window prepared by
+    build_NTP_supervised_sample (sample_len raw tokens -> sample_len - 1 positions), one window per row
+    (PaddingBatcher, batch_size rows of `sequence_len` = T positions), whole batches moved to `device`."""
+    return MixedDataLoader.from_config(
+        loader_config, tokenizers, source_types, build_supervised_sample_fn=build_NTP_supervised_sample,
+        create_batcher_fn=partial(PaddingBatcher, shape=(batch_size, sequence_len),
+                                  pad_values=ntp_pad_values(tokenizers['layout'], tokenizers['control_resolver'])),
+        device=device)
 
 
 def make_loader_factory(data_cfg, tokenizers, source_types, device='cuda',
@@ -70,13 +100,11 @@ def make_loader_factory(data_cfg, tokenizers, source_types, device='cuda',
         src = {
             'type': 'text', 'files': files, 'recipe': recipe,
             'recipe_name': recipe_name, 'split': 'val', 'weight': 1.0,
-            'sequence_len': T, 'device': device,
+            'sample_len': T + 1, 'device': 'cpu',               # rows of T positions, as in training
             'buffer_batch_size': buffer_batch_size,
         }
-        dl = MixedDataLoader(
-            loader_config={'batch_size': B, 'data': {'sequence_len': T, 'sources': [src]}},
-            tokenizers=tokenizers, source_types=source_types, resume_state_dict=None,
-        )
+        dl = make_text_loader({'data': {'sources': [src]}}, tokenizers, source_types, batch_size=B,
+                              sequence_len=T, device=device)
         return iter(dl)
     return factory
 

@@ -28,9 +28,9 @@ doing the migrating. (Deliberately not naming that project: a modality that poin
 at a project goes stale the moment the project is renamed.)
 """
 
-import torch.distributed as dist
-
 from core.evaluation.evaluator import LossEvaluator, Evaluator
+from core.evaluation.metrics import bits_per_byte, mean_ce
+from core.utils import process_identity
 
 from modalities.text.fineweb import token_data_loader
 from modalities.text.tokenizer import get_token_bytes
@@ -43,7 +43,7 @@ class TextEvaluator(Evaluator):
         stream: resolved stream declaration —
             ``{name, files, recipe (dict|None), recipe_name, metric, bpb_metric}``
         eval_config: cadence + budget (``interval_steps`` / ``eval_at`` / ``eval_tokens``)
-        device_batch_size, sequence_len: batch geometry (matches training)
+        device_batch_size, sequence_len: batch geometry, B rows of T positions (matches training)
         loader_factory: ``callable(files, recipe, recipe_name, B, T) -> fresh iterator``.
             Supplied by the orchestrator so assembly lives in ONE place; only the
             ``recipe: null`` bridge bypasses it.
@@ -71,21 +71,30 @@ class TextEvaluator(Evaluator):
         self.sequence_len = sequence_len
 
         eval_tokens = eval_config.get('eval_tokens', 10485760)
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        world_size = process_identity().world_size
+        # Each process evaluates eval_tokens / world_size from its OWN share of the val stream (the stream hands out
+        # row groups by rank), so the window is a different set of documents for each number of processes: compare
+        # val readings taken with the same number of processes, or re-read a checkpoint on one GPU. (A d12 text
+        # checkpoint read 3.4162 on 8 processes and 3.4068 on one.)
         eval_steps = eval_tokens // (device_batch_size * sequence_len * world_size)
 
         self.metric = stream.get('metric', f'val/{self.name}_ce')
         bpb_metric = stream.get('bpb_metric')
+        if bpb_metric == self.metric:
+            # Both names come from the stream's config, and as keys of one metrics dict the second would silently
+            # replace the first: the stream would report its BPB under the CE's name and no CE.
+            raise ValueError(f"eval stream {self.name!r}: metric and bpb_metric are both {self.metric!r}")
+        metrics = {self.metric: mean_ce()}
+        if bpb_metric:
+            # The byte table is fetched only when the stream asks for bpb, and
+            # get_token_bytes fails closed (no ones-table stand-in): a stream that
+            # declares bpb either reports bits per BYTE or does not start. It is
+            # loaded on the CPU; the metric moves it to the batches' device.
+            metrics[bpb_metric] = bits_per_byte(get_token_bytes())
         self._eval = LossEvaluator(
             dataloader=None,                        # created per evaluate() call
             eval_steps=max(1, eval_steps),
-            mode='logits',
-            # The byte table is fetched only when the stream asks for bpb, and
-            # get_token_bytes fails closed (no ones-table stand-in): a stream that
-            # declares bpb either reports bits per BYTE or does not start.
-            token_bytes=get_token_bytes(device='cuda') if bpb_metric else None,
-            total_metric=self.metric,
-            bpb_metric=bpb_metric,
+            metrics=metrics,
         )
 
     def describe(self) -> str:
@@ -96,8 +105,9 @@ class TextEvaluator(Evaluator):
 
     def evaluate(self, model, autocast_ctx):
         # Fresh loader each call -> every evaluation reads the same val data from
-        # the same starting point, so successive points on a curve differ by the
-        # model only, not by which batches happened to come up.
+        # the same starting point (for a given number of processes, see __init__),
+        # so successive points on a curve differ by the model only, not by which
+        # batches happened to come up.
         if self.recipe is None:
             val_loader = token_data_loader(
                 B=self.device_batch_size, T=self.sequence_len, files=self.files,

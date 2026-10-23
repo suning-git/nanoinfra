@@ -84,9 +84,7 @@ def _static(model, max_len=None):
 def _model(n_kv_head):
     torch.manual_seed(0)
     cfg = GPTConfig(n_kv_head=n_kv_head, **CFG)
-    m = GPT(cfg).cuda().to(torch.bfloat16).eval()
-    m.cos, m.sin = m.cos.cuda(), m.sin.cuda()
-    return m
+    return GPT(cfg).cuda().to(torch.bfloat16).eval()        # the rotary tables are buffers: they move along
 
 
 @torch.no_grad()
@@ -226,7 +224,7 @@ def test_bidirectional_mask_sees_the_whole_chunk():
 @torch.no_grad()
 @pytest.mark.parametrize("n_kv_head", [4, 2])          # plain attention, then GQA
 def test_bidirectional_chunk_matches_across_caches(n_kv_head):
-    """A block-diffusion denoise pass (causal=False after a cached prefix) on both
+    """A block-diffusion denoise pass (attention="bidirectional" after a cached prefix) on both
     caches: the dynamic one hands sdpa exactly the valid keys with no mask, the static
     one masks its whole buffer by hand. Same visibility, different kernels — so the
     contract is the one above, relative error plus argmax, and the control below shows
@@ -239,16 +237,21 @@ def test_bidirectional_chunk_matches_across_caches(n_kv_head):
 
     dyn = KVCache.for_model(model.config, 1, CFG["sequence_len"])
     model(prefix, kv_cache=dyn)
-    d = model(chunk, kv_cache=dyn, causal=False)
+    d = model(chunk, kv_cache=dyn, attention="bidirectional")
     _static(model)
     model(prefix, kv_cache=STATIC)
-    s = model(chunk, kv_cache=STATIC, causal=False)
+    s = model(chunk, kv_cache=STATIC, attention="bidirectional")
     assert _rel(d, s) < 5e-2, f"relative error {_rel(d, s):.2e}"
     assert_argmax_agrees(d, s)
 
     dyn.rewind(24)
-    assert _rel(model(chunk, kv_cache=dyn, causal=True), s) > 1e-1, \
+    assert _rel(model(chunk, kv_cache=dyn, attention="causal"), s) > 1e-1, \
         "a causal pass passed for a bidirectional one — the tolerance cannot tell them apart"
+
+
+def _full_mask(q_len, kv_len):
+    from torch.nn.attention.flex_attention import create_block_mask
+    return create_block_mask(lambda b, h, q, kv: q >= 0, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len, device="cuda")
 
 
 @torch.no_grad()
@@ -266,8 +269,9 @@ def test_static_refusals_leave_the_cache_alone():
                    for a, b in zip(before, st.k + st.v)), f"{what} wrote the buffers"
 
     refusals = (
-        (lambda: model(_tokens(4), kv_cache=STATIC, block_mask=object()), ValueError, "block_mask"),
-        (lambda: model(_tokens(4), kv_cache=STATIC, causal=1), TypeError, "causal must be"),
+        (lambda: model(_tokens(4), kv_cache=STATIC, attention=_full_mask(4, CFG["sequence_len"])), ValueError,
+         "does not take a BlockMask"),
+        (lambda: model(_tokens(4), kv_cache=STATIC, attention=1), TypeError, "attention must be"),
         (lambda: st.rewind(-1), ValueError, "negative"),   # would advance pos past what was written
         (lambda: st.rewind(2.0), TypeError, "integer"),    # would leave pos a float
         (lambda: st.rewind(True), TypeError, "host int"),  # a flag where a count belongs
@@ -278,7 +282,7 @@ def test_static_refusals_leave_the_cache_alone():
             call()
         untouched(call)
     for touch in (lambda: st.bidir, lambda: setattr(st, "bidir", True)):
-        with pytest.raises(AttributeError, match="causal="):
+        with pytest.raises(AttributeError, match='attention="bidirectional"'):
             touch()                              # the removed switch fails, not ignored
     model.attach_kv_cache(None)
     with pytest.raises(RuntimeError, match="attach"):

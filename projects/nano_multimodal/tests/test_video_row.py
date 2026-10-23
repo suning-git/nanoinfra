@@ -11,11 +11,11 @@ used to train working models: exemplars/nano_world_model/row_layout.RowLayout,
 constructed with this project's band offsets. Two implementations agreeing
 bit-for-bit is worth more than either one re-reading its own intent.
 
-The same goes for supervision: the 0/1 pattern is checked against
-exemplars/nano_world_model/autoregressive.Autoregressive, which owns the reasons
-(given frame = observation, actions = control input).
+The same goes for supervision: the 0/1 pattern is checked against that RowLayout's
+predicted blocks plus its closing tag (given frame = observation, actions = control
+input, so neither is predicted).
 
-    python -m projects.nano_multimodal.tests.test_video_row
+    python -m projects.nano_multimodal.tests.test_video_row      # or through pytest (test_video_row below)
 """
 
 import numpy as np
@@ -42,8 +42,8 @@ def main():
                      "video_start": r.resolve("video_start"),
                      "video_end": r.resolve("video_end")},
         n_actions=spec.N_ACTIONS)
-    content = rows.content_len
-    assert content == vocab.sequence_len, f"{content} != {vocab.sequence_len}"
+    content = rows.content_len                 # raw tokens per row; the model sees T = content - 1 positions
+    assert content == vocab.sequence_len + 1, f"{content} raw tokens per row, T + 1 = {vocab.sequence_len + 1}"
 
     # --- 1. the row, bit for bit, on 20 random cache rows ----------------------
     rng = np.random.default_rng(0)
@@ -56,13 +56,27 @@ def main():
             f"{np.flatnonzero(mine != ref)[:8]}"
     print(f"row        20/20 rows bit-identical to RowLayout ({content} tokens)")
 
-    # --- 2. supervision, against the exemplar's AR objective ------------------
-    from exemplars.nano_world_model.autoregressive import Autoregressive
-    ref_sup = Autoregressive(rows).predicted[:content].numpy().astype(np.float32)
-    mine_sup = src._lw.cpu().numpy()
+    # --- 1b. token types: what the layout says each token IS -------------------
+    # The types go into the type embedding. The field mixes video codes and action ids, so they are checked against
+    # the layout's classification of the actual tokens (actions were once typed as video here).
+    for i in picks[:5]:
+        tokens = torch.from_numpy(src._row(int(i)))
+        assert torch.equal(src._types.cpu(), vocab.layout.classify_token_types(tokens)), f"row {i}: token types"
+    n_action = int((src._types == spec.ACTION_TYPE_ID).sum())
+    assert n_action == src.n_blocks * src.td, f"{n_action} action-typed positions, {src.n_blocks * src.td} actions"
+    print(f"types      match the layout's classification ({n_action} action positions)")
+
+    # --- 2. supervision, against the RowLayout's predicted positions ----------
+    # The code positions of every predicted latent frame (RowLayout.spans) and the closing tag (RowLayout.end_pos).
+    ref_sup = np.zeros(rows.row_len, dtype=np.float32)
+    for s, e in rows.spans:
+        ref_sup[s:e] = 1
+    ref_sup[rows.end_pos] = 1
+    ref_sup = ref_sup[:content]
+    mine_sup = src._sm.cpu().numpy().astype(np.float32)
     assert np.array_equal(mine_sup, ref_sup), \
         f"supervision differs at {np.flatnonzero(mine_sup != ref_sup)[:8]}"
-    print(f"supervise  identical to Autoregressive: {int(mine_sup.sum())} of {content}")
+    print(f"supervise  identical to RowLayout's predicted positions: {int(mine_sup.sum())} of {content}")
 
     # --- 3. the period, stated independently ---------------------------------
     # Not a restatement of (2): this asserts the SHAPE the browser will draw — a
@@ -78,20 +92,17 @@ def main():
           f"first frame dark")
 
     # --- 4. what the model actually receives ---------------------------------
-    # The source yields tokens + weights; MixedDataLoader shifts. Verify the SHIFT
-    # lands the supervision where the AR objective puts it, since an off-by-one here
-    # would be invisible in (2).
-    from core.data.supervision import NextTokenPrediction
+    # The source yields tokens + supervision_mask; the loader's next-token
+    # preparation shifts. Verify the SHIFT lands the supervision on the positions
+    # that predict those tokens, since an off-by-one here would be invisible in (2).
+    from core.data.supervision import build_NTP_supervised_sample
     from core.tokenization.vocab_layout import VocabLayout
     it = iter(src)
     rowsamp = [next(it) for _ in range(2)]
-    batch = NextTokenPrediction().apply(
-        torch.stack([s["tokens"] for s in rowsamp]),
-        torch.stack([s["token_types"] for s in rowsamp]),
-        torch.stack([s["attention_mask"] for s in rowsamp]),
-        torch.stack([s["loss_weights"] for s in rowsamp]))
-    keep = (batch["targets"][0] != VocabLayout.IGNORE_INDEX).numpy()
+    prepared = build_NTP_supervised_sample(rowsamp[0])
+    keep = (prepared["data"]["targets"] != VocabLayout.IGNORE_INDEX).numpy()
     ref_keep = ref_sup[1:].astype(bool)
+    assert len(keep) == vocab.sequence_len, f"{len(keep)} positions after the shift, T = {vocab.sequence_len}"
     assert np.array_equal(keep, ref_keep), "post-shift supervision is off by one"
     print(f"shift      post-shift targets match ({int(keep.sum())} supervised)")
 
@@ -106,6 +117,10 @@ def main():
     print(f"resume     state={mid} replays deterministically")
 
     print("\nOK — the video row agrees with the implementation that trained working models.")
+
+
+def test_video_row():
+    main()
 
 
 if __name__ == "__main__":

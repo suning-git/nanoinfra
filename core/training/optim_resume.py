@@ -47,23 +47,15 @@ def reconcile_hparams(optimizers, snapshot, *, adopt):
     """
     if not isinstance(adopt, bool):
         raise TypeError(f"checkpoint.override_optimizer_hparams must be true or false, got {adopt!r}")
-    if len(snapshot) != len(optimizers) or any(
-            len(groups) != len(opt.param_groups) for groups, opt in zip(snapshot, optimizers)):
-        raise ValueError(
-            f"resume: snapshot has {[len(g) for g in snapshot]} param groups per optimizer, the "
-            f"optimizers have {[len(o.param_groups) for o in optimizers]}; they must be the same objects")
 
     def finite(v):
         return all(math.isfinite(x) for x in v) if isinstance(v, (tuple, list)) else \
             (math.isfinite(v) if isinstance(v, float) else True)
 
     diffs, incompatible, changes, writes = [], [], [], []
-    for i, (opt, groups) in enumerate(zip(optimizers, snapshot)):
-        for j, (group, before) in enumerate(zip(opt.param_groups, groups)):
+    for i, (opt, groups) in enumerate(zip(optimizers, snapshot, strict=True)):
+        for j, (group, before) in enumerate(zip(opt.param_groups, groups, strict=True)):
             where = f"optimizer[{i}].param_groups[{j}]"
-            if "initial_lr" not in before:
-                raise ValueError(f"resume: {where} has no initial_lr; the LR schedule needs it "
-                                 "(core's build_optimizers sets it)")
             # Require matching field sets before comparing or adopting values.
             for k in sorted((set(before) | set(group)) - set(_SKIP)):
                 if k not in group:

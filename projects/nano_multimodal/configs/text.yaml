@@ -37,12 +37,12 @@ device_batch_size: 16
 total_batch_rows: 256
 
 optimizer:
-  lr_max: 3.0e-4       # the production-horizon bracket's winner; see
-                       # exemplars/text_pretrain/provenance.md before re-tuning
+  lr_max: 3.0e-4       # the July production-horizon bracket's winner, on the July validation
+                       # protocol; see exemplars/text_pretrain/provenance.md (the current
+                       # protocol ranks 6e-4 first) before re-tuning
 
 # 2. WHERE THE DATA COMES FROM.
 data:
-  sequence_len: ${sequence_len}
   datasets:
     fineweb:
       kind: parquet_text

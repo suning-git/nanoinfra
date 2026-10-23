@@ -9,6 +9,13 @@ This is the `projects/` tier: a fork of an exemplar with something changed. Poin
 a newcomer here to see *"has the architecture actually improved since GPT-2, and
 by how much?"*
 
+> **Storage precision.** `example_results/` was recorded with parameters, gradients and AdamW moments stored in bf16,
+> core's only storage then (code up to v0.2.0). Training now stores them in fp32 by default (`param_dtype`). For the
+> modern arm that changes only what is stored; the GPT-2 arms also compute differently, because their token embedding
+> (and the plain GPT-2's `wte + wpe` sum) is no longer cast to bf16. To compare with `example_results/`, run
+> `python run.py param_dtype=bf16` — close to the recorded runs, not identical: since 2026-10 a row of the same
+> `sequence_len` holds one more position than it did when they were recorded.
+
 ## The two architectures
 
 Both are pre-norm decoder-only transformers with the SAME width/depth and the

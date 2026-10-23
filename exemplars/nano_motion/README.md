@@ -93,6 +93,11 @@ single biggest lever on reconstruction quality in the work this comes from.
 
 ## Tests
 
+`tests/test_motion_eval_shard.py` (CPU, `pytest`) checks the evaluator: every
+supervised token counts once, a val set smaller than the frozen batches is taken
+once whole (LAFAN1's 159 windows against 20 batches of 8), each rank evaluates its
+share of the frozen batches, and two processes read what one does.
+
 The multi-GPU checks live next door in `exemplars/nano_world_model/tests/test_ddp.py`
 and cover `core.parallel.NanoDDP` itself, which this exemplar uses through the same
 `Trainer(ddp=...)` seam. Nothing here re-tests core.

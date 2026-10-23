@@ -42,12 +42,42 @@ def test_system_flops_match_historical_formula():
     assert system.estimate_flops() == historical
 
 
-def test_old_name_wrapper_passes_gpt(monkeypatch):
-    # setup_model_for_training keeps the GPT-implied single-config signature
-    # for older callers; it must delegate to build_system with GPT.
+def test_load_system_builds_bf16_storage_unless_told(monkeypatch, tmp_path):
+    # Inference keeps loading into bf16 when the training default changes (2026-10): load_system passes its
+    # own param_dtype, bf16 by default, rather than inheriting build_system's.
+    import json
+    import torch
+    from dataclasses import asdict
     from core.training import model_setup
-    seen = {}
-    monkeypatch.setattr(model_setup, "build_system",
-                        lambda cls, cfg, **kw: seen.update(cls=cls, cfg=cfg) or "ok")
-    assert model_setup.setup_model_for_training(TINY, head_ce="naive") == "ok"
-    assert seen["cls"] is GPT and seen["cfg"] is TINY
+    from core.model import checkpoint_manager
+    (tmp_path / "meta.json").write_text(json.dumps({"step": 0, "model_config": asdict(TINY), "model_arch": "GPT"}))
+    seen = []
+
+    class _System:
+        def eval(self):
+            return self
+
+    monkeypatch.setattr(model_setup, "build_system", lambda cls, cfg, **kw: seen.append(kw) or
+                        {"system": _System(), "rank": 0, "world_size": 1})
+    monkeypatch.setattr(checkpoint_manager, "load_model_only", lambda *a, **kw: None)
+    model_setup.load_system(str(tmp_path))
+    model_setup.load_system(str(tmp_path), param_dtype=torch.float32)
+    assert [kw["param_dtype"] for kw in seen] == [torch.bfloat16, torch.float32]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="build_system places the model on CUDA")
+def test_build_system_stores_fp32_unless_told():
+    # The training default (since 2026-10): parameters, and so gradients and AdamW moments, in fp32; bf16 on request.
+    from core.training.model_setup import build_system
+    default = build_system(GPT, TINY, parallel="ddp")["system"]
+    assert {p.dtype for p in default.parameters()} == {torch.float32}
+    bf16 = build_system(GPT, TINY, parallel="ddp", param_dtype=torch.bfloat16)["system"]
+    assert {p.dtype for p in bf16.parameters()} == {torch.bfloat16}
+
+
+def test_build_system_refuses_a_storage_it_does_not_offer():
+    # Checked first, before any process group or model: with parameters only converted through bf16 into
+    # param_dtype, float16 would otherwise go through as fp16 master weights, with no GradScaler anywhere.
+    from core.training.model_setup import build_system
+    with pytest.raises(ValueError, match="param_dtype must be torch.bfloat16 or torch.float32"):
+        build_system(GPT, TINY, parallel="ddp", param_dtype=torch.float16)

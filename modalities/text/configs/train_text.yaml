@@ -14,7 +14,16 @@ defaults:
 # ----------------------------------------------------------------------------
 # Hardware / batch
 # ----------------------------------------------------------------------------
-sequence_len: 512               # MFU rises with seq (audit: d12 512->2048 = +8.6 pts)
+sequence_len: 512               # T: positions per row, for the Trainer, the GPT and the batcher; each source
+                                #   window is T + 1 raw tokens. MFU rises with seq (audit: d12 512->2048 = +8.6 pts)
+                                # A run trained before 2026-10 with sequence_len 512 had rows of 511, stored in
+                                #   bf16. To continue it on its own cut: param_dtype=bf16, sequence_len=511,
+                                #   total_batch_size=130816 (16 rows x 511 positions x 16 micro-batches) and
+                                #   max_steps= that run's (the automatic count follows total_batch_size). With
+                                #   param_dtype=bf16 and the other defaults it continues on the new cut;
+                                #   val/text_ce then reads high at first (the recipe's text_end sits one position
+                                #   later than the old model learned; d12: +0.018, gone by the eval 250 steps later).
+                                #   (checkpoint.allow_param_dtype_change=true instead converts it to fp32 storage.)
 device_batch_size: 16
 total_batch_size: 131072
 
@@ -28,7 +37,7 @@ total_batch_size: 131072
 # parameters at d6 and nearly half at d2:
 #   naive 24% | liger 48% | compiled 61%   (d6)
 #   naive 53% | liger 63% | compiled 73%   (d12)
-# The default below is `naive`, i.e. the LEFT column.
+# The default below is `compiled`, i.e. the RIGHT column.
 # Shallow models CANNOT reach high MFU (384-wide GEMMs cap at ~70% of peak;
 # the un-embedding outweighs the trunk) — depth is the main MFU lever.
 # ----------------------------------------------------------------------------
@@ -54,8 +63,12 @@ compile_trunk: true             # audit: +19-34% tok/s; keep on. The script deci
 # 60.8% MFU across the three). There is deliberately no "auto": which arm a run takes
 # must not depend on what happens to be pip-installed, because the arms differ in
 # NUMERICS, not just speed. See core/training/model_setup.py for what each value
-# means and what each was measured at.
-head_ce: naive
+# means and what each was measured at. compiled since 2026-10-22 (it was naive, core's
+# default): the fastest, needs no optional package, the closest to naive in numbers; d6 on
+# one RTX 5090, 300 steps: naive 390 / liger 316 / compiled 160 ms a step, peak 5.36 /
+# 1.50 / 1.88 GiB, val at step 299 the same to four places.
+head_ce: compiled
+deterministic: false             # torch.use_deterministic_algorithms(True) for the run (the 2026-10 storage-precision experiments); ~6% slower
 
 # Multi-GPU strategy: "ddp" replicates the model and reduces gradients during
 # backward, "fsdp" shards parameters. Ignored on one GPU. While the model FITS,
@@ -68,8 +81,6 @@ parallel: fsdp
 # TextDataSource; on-the-fly BPE is fully hidden behind compute — audit M2).
 # ----------------------------------------------------------------------------
 data:
-  sequence_len: ${sequence_len}
-
   # Datasets declare their own splits. Nothing is inferred from the directory
   # listing: `val` is PINNED and `train` is the complement, so downloading more
   # shards grows train and leaves the ruler untouched (the reverse convention
@@ -99,6 +110,7 @@ data:
       buffer_batch_size: 32
       tokenizer_threads: 4      # audit: 4 vs 16 makes no difference
       tokenizer_batch_size: 128
+      # sample_len: 513         # raw tokens per window; default sequence_len + 1 (rows of sequence_len)
 
 optimizer:
   # 2026-07 LR audit: the Muon-era matrix lr
@@ -106,7 +118,10 @@ optimizer:
   # the PRODUCTION-horizon re-bracket (exemplars/text_pretrain, full 2.705B
   # tokens) INVERTED that: 3e-4 3.8101 < 6e-4 3.8150 < 2.4e-3 3.8643 <
   # 1.2e-3 3.9307. Short probes overestimate the optimum; 3e-4 was right all
-  # along. Reverted 2026-07-07 (Ning's call). embedding_lr/unembedding_lr
+  # along. Reverted 2026-07-07 (Ning's call). (That ranking was read on the July validation
+  # protocol; re-read on the current one, the same checkpoints rank 6e-4 3.44 < 1.2e-3 3.45 <
+  # 3e-4 3.52 at step 20000, and the exemplar's champion now trains at 6e-4 — see its
+  # provenance.md. This default is unchanged.) embedding_lr/unembedding_lr
   # (train_base defaults 0.2/0.004) each PASSED their audit — keep.
   lr_max: 3.0e-4
 

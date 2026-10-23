@@ -27,9 +27,10 @@ model:
   n_head: 12
   n_kv_head: ${model.n_head}
 
-# sequence_len is DERIVED from spec.video_shape(): 4 delimiters + 5 latent frames of
-# 256 codes + 16 action ids = 1300. Written here as null so the config cannot
-# disagree with the shape contract.
+# sequence_len is DERIVED from spec.video_shape(): a row is 4 delimiters + 5 latent
+# frames of 256 codes + 16 action ids = 1300 tokens, trained as 1299 positions (the
+# next-token shift). Written here as null so the config cannot disagree with the
+# shape contract.
 sequence_len: null
 
 clip:
@@ -45,7 +46,8 @@ clip:
 #   video_cache=${repo:exemplars/nano_world_model/outputs/cache/dv128_17f}
 video_cache: ${repo:projects/nano_multimodal/outputs/cache/dv128_17f}
 
-# 32 rows x 1300 = 41,600 tokens per step. THIS is where the number came from: the
+# 32 rows x 1299 positions = 41,568 tokens per step (a row of 1300 tokens trains as 1299 positions).
+# THIS is where the number came from: the
 # research line measured a knee at >=32k SUPERVISED tokens per update, and below it the
 # same token budget spends itself in updates that are individually too noisy (raising
 # the batch 8x at equal tokens bought ~0.15 nat for free). It was the right number
@@ -73,7 +75,6 @@ optimizer:
     warmup_steps: 300
 
 data:
-  sequence_len: ${sequence_len}
   recipes:
     # 3. HOW THE ROW IS LAID OUT. One field: the source interleaves codes and action
     #    ids into one flat sequence, exactly as text hands over one flat run of BPE

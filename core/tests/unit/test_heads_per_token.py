@@ -1,8 +1,9 @@
 """LMHead.loss_per_token: unreduced CE with weighting left to the objective.
 
-CPU tests cover the output contract and Liger's explicit refusal. GPU tests cover
-compiled values and weighted gradients, peak-memory reduction at a fixed shape,
-and build_system's method binding and dynamic N support. Peak allocation measures
+CPU tests cover the output contract and Liger's grad-mode gate (refused with gradient
+recording, served without). GPU tests cover Liger's no-grad values, compiled values and
+weighted gradients, peak-memory reduction at a fixed shape, and build_system's method
+binding and dynamic N support. Peak allocation measures
 the memory benefit; it does not identify which intermediate tensors materialize.
 """
 
@@ -35,14 +36,66 @@ def test_mean_over_supervised_positions_is_the_scalar_loss():
     torch.testing.assert_close(per[valid].mean(), head.loss(hidden, targets))
 
 
-def test_liger_arm_refuses():
-    head = LMHead(8, 16)
+def _liger_head(dim=8, vocab=16):
+    head = LMHead(dim, vocab)
     if LIGER_AVAILABLE:
         LigerLMHead.setup(head)
     else:
-        head.__class__ = LigerLMHead                  # what setup() does after fused_ce
-    with pytest.raises(NotImplementedError, match="head_ce='compiled'"):
-        head.loss_per_token(torch.randn(2, 3, 8), torch.randint(0, 16, (2, 3)))
+        head.__class__ = LigerLMHead                  # what setup() does after building fused_ce*
+    return head
+
+
+def test_liger_arm_refuses_with_gradient_recording():
+    """Liger's reduction='none' backward would get per-token weights wrong, so a training call is refused —
+    including one whose hidden needs no gradient (trunk frozen) while the head's weight does."""
+    head = _liger_head()
+    targets = torch.randint(0, 16, (2, 3))
+    for hidden in (torch.randn(2, 3, 8, requires_grad=True), torch.randn(2, 3, 8)):
+        with pytest.raises(NotImplementedError, match="head_ce='compiled'"):
+            head.loss_per_token(hidden, targets)
+
+
+def test_liger_arm_serves_without_gradient_recording_on_cpu():
+    """Off CUDA the liger head falls back to the naive per-token CE, behind the same gate."""
+    head = _liger_head()
+    hidden, targets = torch.randn(2, 3, 8), torch.randint(0, 16, (2, 3))
+    with torch.no_grad():
+        torch.testing.assert_close(head.loss_per_token(hidden, targets), LMHead.loss_per_token(head, hidden, targets))
+
+
+@gpu
+@pytest.mark.skipif(not LIGER_AVAILABLE, reason="needs liger")
+@pytest.mark.parametrize("dtype,autocast", [(torch.float32, True), (torch.float32, False), (torch.bfloat16, True)])
+def test_liger_arm_without_gradients_matches_naive(dtype, autocast):
+    """Evaluation's entry on the liger head: the fused kernel's per-token CE (no gradient computed) against the
+    naive one, IGNORE positions zero, a whole-IGNORE batch all zeros, and a hidden that was made with
+    requires_grad=True giving the same values (detached inside, so Liger computes no input gradient)."""
+    torch.manual_seed(0)
+    naive = LMHead(256, 4096).cuda().to(dtype)
+    with torch.no_grad():
+        naive.lm_head.weight.normal_(0, 0.05)
+    liger = LMHead(256, 4096).cuda().to(dtype)
+    liger.load_state_dict(naive.state_dict())
+    LigerLMHead.setup(liger)
+    # Values cannot tell whether Liger also computed gradients (it computes them in its forward whenever its input
+    # requires one), so look at what reaches the kernel.
+    reached = []
+    liger.fused_ce_per_token.register_forward_pre_hook(lambda module, args: reached.append(args[1].requires_grad))
+    hidden = torch.randn(4, 64, 256, device="cuda", dtype=dtype)
+    targets = torch.randint(0, 4096, (4, 64), device="cuda")
+    targets[0, :10] = IGNORE
+    ctx = torch.autocast("cuda", torch.bfloat16) if autocast else contextlib.nullcontext()
+    with torch.no_grad(), ctx:
+        want = naive.loss_per_token(hidden, targets).float()
+        got = liger.loss_per_token(hidden, targets).float()
+        from_grad_hidden = liger.loss_per_token(hidden.clone().requires_grad_(True), targets).float()
+        all_ignored = liger.loss_per_token(hidden, torch.full_like(targets, IGNORE))
+    assert got.shape == want.shape == (4 * 64,)
+    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
+    assert (got[:10] == 0).all()
+    assert torch.equal(from_grad_hidden, got)
+    assert reached == [False, False, False]             # the requires_grad=True hidden was detached on the way
+    assert (all_ignored == 0).all()
 
 
 # ---- the compiled arm (GPU) --------------------------------------------------------
@@ -127,21 +180,15 @@ TINY = GPTConfig(sequence_len=16, vocab_size=64, n_layer=2,
 @contextlib.contextmanager
 def _assembled(head_ce):
     """The head build_system hands out for a tiny GPT on this one device, the way an
-    orchestrator gets it. init_distributed sets the process-wide matmul precision (and
-    the seed) on the way; the precision is put back so later tests see what they
-    expect."""
+    orchestrator gets it."""
     from core.training.model_setup import build_system
-    precision = torch.get_float32_matmul_precision()
-    try:
-        yield build_system(GPT, TINY, head_ce=head_ce, parallel="ddp")["system"].head
-    finally:
-        torch.set_float32_matmul_precision(precision)
+    yield build_system(GPT, TINY, head_ce=head_ce, parallel="ddp")["system"].head
 
 
 @gpu
 def test_build_system_binds_the_arm():
     """"compiled" binds loss_per_token as a dynamo wrapper next to loss; "naive" leaves
-    the class method alone; "liger" hands out a head that refuses it."""
+    the class method alone; "liger" hands out a head that refuses it with gradient recording."""
     torch._dynamo.reset()
     hidden = torch.randn(3, TINY.n_embd, device="cuda")
     targets = torch.randint(0, TINY.vocab_size, (3,), device="cuda")

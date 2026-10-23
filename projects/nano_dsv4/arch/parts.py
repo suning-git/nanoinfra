@@ -178,10 +178,8 @@ class NoAuxRouter(nn.Module):
         raise ValueError(self.score_fn)
 
     def forward(self, flat_x):
-        # build_system casts the whole trunk to bf16 AFTER init; promote the
-        # bias buffer back to fp32 lazily so 1e-3 updates don't quantize away
-        if self.e_score_correction_bias.dtype != torch.float32:
-            self.e_score_correction_bias.data = self.e_score_correction_bias.data.float()
+        # The bias and the load accumulator are fp32 buffers, and stay fp32 under bf16 parameter storage
+        # (build_system converts parameters only): 1e-3 bias updates would quantize away in bf16.
         logits = F.linear(flat_x.float(), self.weight.float())
         scores = self._scores(logits)
         topk_idx = torch.topk(scores + self.e_score_correction_bias, self.top_k, dim=-1, sorted=False).indices
@@ -192,8 +190,6 @@ class NoAuxRouter(nn.Module):
                 # ONLY accumulate here. forward() sees one micro-batch on one rank;
                 # the controller is defined over the whole optimizer step on the whole
                 # global batch. step_routers() is where those shards are summed.
-                if self._load_accum.dtype != torch.float32:
-                    self._load_accum.data = self._load_accum.data.float()
                 self._load_accum += torch.bincount(
                     topk_idx.flatten(), minlength=self.n_experts).float()
                 # NOTHING ELSE GOES HERE. In particular, no Python int counter:
@@ -235,11 +231,6 @@ def step_routers(model) -> int:
     if not routers:
         return 0
     with torch.no_grad():
-        for m in routers:
-            if m._load_accum.dtype != torch.float32:
-                m._load_accum.data = m._load_accum.data.float()
-            if m.e_score_correction_bias.dtype != torch.float32:
-                m.e_score_correction_bias.data = m.e_score_correction_bias.data.float()
         if dist.is_available() and dist.is_initialized():
             # One collective for all routers, not one each. It runs outside forward
             # and outside the backward's comm stream, so it cannot race the gradient

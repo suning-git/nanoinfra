@@ -42,15 +42,15 @@ import torch
 import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 
-from core.data.mixed_dataloader import MixedDataLoader
 from core.model.gpt import GPT, GPTConfig
-from core.training.trainer import create_optimizers
-from core.utils import print0
+from core.training.optim import build_optimizers
+from core.utils import print0, set_torch_global_defaults
 
 # Importing the text orchestrator also registers its ${eval:} config resolver and
 # gives us its assembly helpers — we drive the real thing, not a lookalike.
 from modalities.text import get_tokenizer
-from modalities.text.streams import build_evaluators, resolve_sources
+from modalities.text.streams import build_evaluators, make_text_loader, resolve_sources
+from core.model.system import prepare_unpacked_AR_trunk_inputs
 import modalities.text.train_text as text_orchestrator
 
 from core.parallel import NanoDDP, block_buckets, sync_gradients
@@ -125,6 +125,8 @@ def throughput(system, dataloader, ddp, tokens_per_step, steps=12, warmup=4):
 @hydra.main(version_base=None, config_path="../text/configs",
             config_name="train_text")
 def main(cfg: DictConfig) -> None:
+    # Process-wide PyTorch settings (CUDA allocator, TF32) are the entry's to make, before anything uses CUDA.
+    set_torch_global_defaults()
     config = OmegaConf.to_container(cfg, resolve=True)
     if SCALE:
         # ~520M. Sized to what fits BESIDE whatever else is on the box, not to the
@@ -152,20 +154,19 @@ def main(cfg: DictConfig) -> None:
         n_kv_head=model_config["n_kv_head"], n_embd=model_config["dim"],
         n_token_types=layout.n_token_types)
     setup = build_system(GPT, gpt_config, head_ce="liger",
-                         seed=config.get("seed", 42), parallel="ddp")
+                         seed=config.get("seed", 42), parallel="ddp",
+                         prepare_trunk_inputs_fn=prepare_unpacked_AR_trunk_inputs,
+                         param_dtype={"bf16": torch.bfloat16, "fp32": torch.float32}[config["param_dtype"]])
     system, rank, world = setup["system"], setup["rank"], setup["world_size"]
     if config.get("compile_trunk", True):
         compile_blocks(system.trunk)
 
     tokenizers = {"text": tokenizer, "layout": layout,
                   "control_resolver": control_resolver}
-    sources = resolve_sources(config["data"], config["sequence_len"], device="cuda")
-    dataloader = MixedDataLoader(
-        loader_config={"batch_size": config["device_batch_size"],
-                       "data": {"sequence_len": config["sequence_len"],
-                                "sources": sources}},
-        tokenizers=tokenizers, source_types=text_orchestrator.SOURCE_TYPES,
-        resume_state_dict=None)
+    sources = resolve_sources(config["data"], config["sequence_len"], device="cpu")
+    dataloader = make_text_loader(
+        {"data": {"sources": sources}}, tokenizers, text_orchestrator.SOURCE_TYPES,
+        batch_size=config["device_batch_size"], sequence_len=config["sequence_len"], device="cuda")
 
     ddp = None
     if world > 1:
@@ -188,7 +189,7 @@ def main(cfg: DictConfig) -> None:
 
     # The real thing: core's Trainer, the ddp seam, real data, real evaluation.
     config["total_batch_size"] = tokens_per_step * world
-    optimizers = create_optimizers(system, config["optimizer"], world_size=world)
+    optimizers = build_optimizers(system, config["optimizer"])
     evaluators = build_evaluators(config, tokenizers, text_orchestrator.SOURCE_TYPES,
                                   config["device_batch_size"], config["sequence_len"],
                                   device="cuda")

@@ -4,7 +4,7 @@ The table shipped 2026-07-10 was derived with `len(tok.decode([i]).encode("utf-8
 Decoding one token that holds a partial UTF-8 sequence (a byte-fallback id, or a
 merge that ends mid-character) yields U+FFFD, whose encoding is 3 bytes — so 216 ids
 of the 32768 vocab were overstated. This biased bpb low by a corpus-dependent amount
-(about 0.08% on one FineWeb sample; core queue #12).
+(about 0.08% on one FineWeb sample).
 `build_token_bytes` uses tiktoken's `decode_single_token_bytes`, which is right; these
 tests pin that and keep the wrong recipe from coming back.
 
@@ -85,7 +85,7 @@ def test_the_shipped_table_matches_the_builder(monkeypatch):
     assert (shipped[tok.control_token_offset:] == 0).all()
 
 
-# ---- fail closed (queue #16, public issue #6) ------------------------------------------
+# ---- fail closed (public issue #6) ------------------------------------------------------
 
 def test_missing_table_raises_instead_of_reporting_bits_per_token(tmp_path, monkeypatch):
     """No token_bytes.pt -> error. The old ones-table fallback kept the `bpb` name on

@@ -111,8 +111,6 @@ class GPT2RoPETrunk(nn.Module):
         self.apply(self._init_weights)
         head_dim = self.config.n_embd // self.config.n_head
         self.cos, self.sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
-        if self.transformer.wte.weight.device.type == "cuda":
-            self.transformer.wte.to(dtype=torch.bfloat16)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -149,7 +147,9 @@ class GPT2RoPETrunk(nn.Module):
     def get_device(self):
         return self.transformer.wte.weight.device
 
-    def forward(self, idx, token_types=None, kv_cache=None, block_mask=None):
+    def forward(self, idx, token_types=None, kv_cache=None, *, attention="causal"):
+        if attention != "causal":
+            raise ValueError(f'GPT2RoPETrunk computes causal attention only, got attention={attention!r}')
         B, T = idx.shape
         x = self.transformer.wte(idx)
         # GPT-2 has no token-type embedding — token_types is ignored on purpose.

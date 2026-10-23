@@ -1,5 +1,8 @@
 # Inference across the budget ladder — one architecture, four budgets
 
+> July 2026 measurements, kept as measured: bf16 storage, lr 3e-4, the head arm of that time. The top rung is
+> July's champion, not the current one (RESULTS §1).
+
 Same architecture (the spec.py d12): decoder-only transformer, **12 layers,
 dim 768, 6 heads** (head_dim 128), RoPE, vocab 32768 (BPE), trained at
 sequence_len 512, **135.3M total params**. Every rung is a PROPERLY SCHEDULED
@@ -11,7 +14,7 @@ read of a longer run):
 | **20M tokens** | ~2 min, 2×5090 | **1.759** | 5.431 |
 | **131M tokens** | ~7 min, 2×5090 | **1.411** | 4.356 |
 | **1.1B tokens** | 64.7 min, 2×5090 | **1.251** | 3.861 |
-| **2.7B tokens** (Chinchilla 20 tok/param; the pinned champion) | ≈4.4 h, 1×5090 | **1.236** | 3.817 |
+| **2.7B tokens** (Chinchilla 20 tok/param; July's champion) | ≈4.4 h, 1×5090 | **1.236** | 3.817 |
 
 All four are direct measurements on the SHIPPED checkpoints over the common
 2 M val window (one protocol, comparable numbers). Each run's own training log
@@ -30,7 +33,10 @@ Sampling: same prompts, same seed (temp 0.8, top-k 40), core KV-cache engine.
 All checkpoints are SELF-DESCRIBING; each loads with one `load_system(ckpt_dir)`.
 **Bold = prompt, plain = the model's continuation.**
 
-Reproduce (each rung = the same spec with a max_steps override):
+Reproduce (each rung = the same spec with a max_steps override). These commands now train the current recipe
+(fp32 storage by default, and `pretrain.py` the current champion); for the July rungs add `param_dtype=bf16
+optimizer.lr_max=3e-4`. The July samples came from an earlier `inference.py` that sampled the four prompts as one
+left-padded batch.
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 .venv/bin/torchrun --nproc_per_node=2 --standalone \
   -m modalities.text.train_text model.depth=12 max_steps=<150|1000|8400> \

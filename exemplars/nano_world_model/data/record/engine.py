@@ -3,7 +3,7 @@ data/record/engine.py — the VizDoom shell and where bytes land.
 
 Everything in here is REPLAY-CRITICAL: `Game` records the console-command
 schedule and the preroll button vectors alongside the stream, which is what
-makes an episode reconstructible from its sidecar alone (gate D1, bit-exact).
+makes an episode reconstructible from its sidecar alone, bit for bit.
 Change the order of commands or steps and old corpora stop replaying.
 
 Paths are resolved ONCE here so every consumer agrees on them: this exemplar

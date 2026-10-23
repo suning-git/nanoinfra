@@ -1,5 +1,5 @@
 """
-row_layout.py — the row: where every token of a clip sits, and who may see whom.
+row_layout.py — the row: where every token of a clip sits.
 
 ONE class owns the layout. In the research code this knowledge was split between a
 row BUILDER (which emitted the token sequence) and a row GEOMETRY (which described
@@ -18,44 +18,20 @@ it, so the causal action->frame link is local rather than 700 tokens away; L0 is
 given initial observation, so no actions precede it, and the final action drives a
 frame outside the window and is dropped.
 
-TRAINING SEQUENCE (BD3-LM's vectorized two-stream trick):
+The row is padded with eos to a multiple of 128 positions. Training lays two copies
+of it end to end ([clean | noisy], block_diffusion.py), and flex attention works in
+tiles of 128 positions: with the padding the noisy copy starts on a tile boundary, so
+its blocks cut the tiles exactly where the clean copy's do. Laid back to back without
+it, the noisy copy is shifted against the tile grid and more tiles are only partly
+visible, which costs time and changes nothing else.
 
-    [ clean row | noisy row ]        length 2n
-
-so one forward pass gives every block both a clean prefix and its own noised
-content. The attention mask (`train_block_mask`) grants:
-    clean->clean   causal — an ordinary prefix-providing pass
-    noisy_k->clean strictly before block k's start (its own clean block EXCLUDED,
-                   which would otherwise hand the model its own labels)
-    noisy_k->noisy its own block, bidirectionally — mask tokens co-denoise
-    noisy_cond     the duplicated conditioning positions, causal; outputs unused
-The mask depends only on the shape contract, so ONE mask serves every row and every noise level.
-
-Rope positions are MIRRORED (0..n-1 twice) so the second stream sits in the same
-positional range the model was trained on — a table swap, no core changes.
+Who may see whom is not decided here. The attention rules live with the objective
+(block_diffusion.py) and read per-position facts every prepared clip carries; `blk`
+and `start_of` below are where those facts come from.
 """
 
 import numpy as np
 import torch
-from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-
-_FLEX_PATCHED = False
-
-
-def use_compiled_flex_attention():
-    """Point core's flex_attention symbol at the COMPILED kernel. Call once, early.
-
-    Not an import side effect on purpose (core has no magic globals) — but
-    also not optional: eager flex_attention silently runs a debug path with WRONG
-    outputs (causal propagation dead; torch itself says "SOLUTION: Use
-    torch.compile(flex_attention)"). `RowLayout.train_block_mask` asserts this ran,
-    so forgetting it is an error rather than a quietly untrained model.
-    """
-    global _FLEX_PATCHED
-    if not _FLEX_PATCHED:
-        import core.model.gpt as gpt_module
-        gpt_module.flex_attention = torch.compile(flex_attention, dynamic=False)
-        _FLEX_PATCHED = True
 
 
 class RowLayout:
@@ -67,7 +43,7 @@ class RowLayout:
         control_ids: {"bos", "eos", "video_start", "video_end"} -> global id
     """
 
-    ALIGN = 128   # flex_attention requires Q_LEN % 128 == 0
+    ALIGN = 128   # flex attention's tile: the row is padded to a multiple of it (module docstring)
 
     def __init__(self, contract, video_offset, action_offset, control_ids, n_actions):
         self.contract = contract
@@ -106,8 +82,8 @@ class RowLayout:
         self.code_slots = np.asarray(code_slots)     # [n_lat * cpf], cache column order
         self.action_slots = np.asarray(action_slots)  # [n_blocks * td]
         self.spans = spans                            # per predicted block: (start, end)
-        self.blk = torch.from_numpy(blk)              # block index per position, 0 = conditioning
-        self.start_of = torch.from_numpy(start_of)
+        self.blk = torch.from_numpy(blk)              # block index per position, 0 = not in a predicted block
+        self.start_of = torch.from_numpy(start_of)    # where that block starts (0 outside one)
 
         # The constant scaffolding: control tokens in place, eos everywhere else.
         template = np.full(self.row_len, self.ctrl["eos"], dtype=np.int64)
@@ -135,56 +111,6 @@ class RowLayout:
         a = np.clip(actions[:, self.action_cols].astype(np.int64), 0, self.n_actions - 1)
         idx[:, self.action_slots] = self.a_off + a
         return torch.from_numpy(idx)
-
-    # --- attention ------------------------------------------------------------
-    def train_block_mask(self, device, batch=None):
-        """BlockMask over [clean | noisy] (length 2n). True = may attend."""
-        assert _FLEX_PATCHED, (
-            "call row_layout.use_compiled_flex_attention() before building a mask — "
-            "eager flex_attention returns silently wrong values")
-        n = self.row_len
-        blk = self.blk.to(device)
-        start = self.start_of.to(device)
-
-        def mask_mod(b, h, q, kv):
-            qs, qm = q // n, q % n
-            ks, km = kv // n, kv % n
-            qb = blk[qm]
-            clean_causal = (qs == 0) & (ks == 0) & (km <= qm)
-            noisy_prefix = (qs == 1) & (qb > 0) & (ks == 0) & (km < start[qm])
-            noisy_self = (qs == 1) & (qb > 0) & (ks == 1) & (blk[km] == qb)
-            noisy_cond = (qs == 1) & (qb == 0) & (ks == 0) & (km <= qm)
-            return clean_causal | noisy_prefix | noisy_self | noisy_cond
-
-        return create_block_mask(mask_mod, B=batch, H=None,
-                                 Q_LEN=2 * n, KV_LEN=2 * n, device=device)
-
-    def sample_block_mask(self, k, seq_len, device):
-        """Mask for SAMPLING block k on a single-stream sequence: positions inside
-        block k see the clean prefix plus the whole block bidirectionally;
-        everything else is causal. seq_len must be a multiple of 128."""
-        assert _FLEX_PATCHED, "call use_compiled_flex_attention() first"
-        s, e = self.spans[k - 1]
-        s_t = torch.tensor(s, device=device)
-        e_t = torch.tensor(e, device=device)
-
-        def mask_mod(b, h, q, kv):
-            in_q = (q >= s_t) & (q < e_t)
-            in_kv = (kv >= s_t) & (kv < e_t)
-            return (in_q & ((kv < s_t) | in_kv)) | ((~in_q) & (kv <= q))
-
-        return create_block_mask(mask_mod, B=None, H=None,
-                                 Q_LEN=seq_len, KV_LEN=seq_len, device=device)
-
-    def install_mirror_rope(self, trunk):
-        """Swap the trunk's rope tables so a 2n sequence gets positions
-        [0..n-1, 0..n-1] — stream B mirrors stream A, keeping every relative offset
-        inside the range the model was trained on. Returns the originals."""
-        orig = (trunk.cos, trunk.sin)
-        pos = torch.arange(2 * self.row_len, device=trunk.cos.device) % self.row_len
-        trunk.cos = orig[0][:, pos].contiguous()
-        trunk.sin = orig[1][:, pos].contiguous()
-        return orig
 
     def __repr__(self):
         return (f"RowLayout(row_len={self.row_len}, content={self.content_len}, "

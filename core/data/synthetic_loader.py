@@ -17,13 +17,6 @@ import numpy as np
 import torch
 
 
-def _resolve_device(device: str | torch.device) -> torch.device:
-    device_name = str(device)
-    if device_name.startswith("cuda") and not torch.cuda.is_available():
-        return torch.device("cpu")
-    return torch.device(device)
-
-
 def _load_token_stream(data_path: Optional[str], vocab_size: int) -> Optional[torch.Tensor]:
     """The whole file becomes an in-memory token stream (8 bytes/token as int64) —
     size the file accordingly (a debug mechanism, not a dataset loader)."""
@@ -56,7 +49,7 @@ def synthetic_token_loader(
       ``{idx:[B,T], token_types:[B,T], targets:[B,T], target_types:[B,T], state_dict}``
     (token_types all 0 — there is no layout here to classify against).
     """
-    resolved_device = _resolve_device(device)
+    device = torch.device(device)
     stream = _load_token_stream(data_path, vocab_size)
 
     state = dict(resume_state_dict or {})
@@ -91,8 +84,8 @@ def synthetic_token_loader(
                     offset = (offset + take) % stream.numel()
                 seq = torch.cat(parts)
 
-        inputs = seq[:-1].view(B, T).to(resolved_device)
-        targets = seq[1:].view(B, T).to(resolved_device)
+        inputs = seq[:-1].view(B, T).to(device)
+        targets = seq[1:].view(B, T).to(device)
         token_types = torch.zeros_like(inputs)
         step += 1
 

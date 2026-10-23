@@ -9,7 +9,7 @@ Produces the two files everything else loads (see get_tokenizer / get_token_byte
 
 Corpus = the FineWeb parquet shards already on disk under base_data/ (the same
 files training streams; download via exemplars/text_pretrain/data/download_shards.py).
-This is the assembly point of the artifact-build flow (D1.3): the protocol
+This is the assembly point of the artifact-build flow: the protocol
 registry is imported from modalities/control and passed as display-form strings
 into the protocol-agnostic trainer — the tokenizer itself knows nothing of
 "control", it just appends the strings it is handed.

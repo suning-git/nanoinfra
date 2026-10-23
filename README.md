@@ -22,8 +22,8 @@ assembler and the same `Trainer`.
 |-----|------|
 | `core/` | the mechanisms, zero modality knowledge — model (GPT / attention / RoPE / KV-cache), pluggable heads, `Trainer`, tokenization, data pipeline, evaluation. **`core` never imports a modality.** |
 | `modalities/` | per-modality implementations + the `assembler` that wires them into a shared vocab. Ships with `text` and `motion`. |
-| `exemplars/text_pretrain/` | a complete, minimal text-LM project — train a 135M model to val CE 3.81, measure the compute-optimal scaling law (exponent a ≈ 0.52), sample from it. The reference you fork. |
-| `exemplars/nano_world_model/` | a video world model: VizDoom as discrete tokens, trained either autoregressively or with block diffusion over one pipeline, and decoded at ~1.1 ms/token. |
+| `exemplars/text_pretrain/` | a complete, minimal text-LM project — train a 135M model to val CE 3.41, measure the compute-optimal scaling law (exponent a ≈ 0.50), sample from it. The reference you fork. |
+| `exemplars/nano_world_model/` | a video world model: VizDoom as discrete tokens, trained with block diffusion (one latent frame per block) on core's data pipeline, and generating video action by action at ~110 game frames/s. |
 | `exemplars/nano_motion/` | text → human motion: train the motion tokenizer, then a model that turns a caption into a moving skeleton. |
 | `projects/` | where your own work goes — a fork of an exemplar with one thing changed. |
 
@@ -53,15 +53,16 @@ has no suitable interpreter, `uv venv` fetches one from GitHub, which a firewall
 network will not allow — supply your own instead, with
 `uv venv --python /path/to/python3.12`.
 
-The `liger` extra is what the exemplars pin as their `head_ce` — the
-implementation their recorded numbers were measured on (the world model's block
-diffusion arm is the one exception: it needs an unreduced per-token loss and uses
-`compiled`). It is an extra rather than a
-base dependency because nothing in the framework's default path needs it: core's
-`head_ce` defaults to `naive`, which depends on no optional package and runs
-anywhere. Plain `pip install -e .` installs and runs fine; the exemplars will then
-stop with a message naming this line, rather than quietly training a different arm
-than the one their numbers came from. See
+The `liger` extra installs one of the three `head_ce` arms, Liger's fused
+cross-entropy, the one with the lowest peak memory; the install lines above include it
+so that every arm is there. No exemplar pins it: since 2026-10-22 every exemplar stage
+pins `compiled`, the fastest arm, which needs no optional package (some recorded
+numbers, among them the text exemplar's shipped scaling curves, were measured with
+`liger`, and say so). It is an extra rather than a base dependency because nothing in
+the framework's default path needs it: core's `head_ce` defaults to `naive`, which
+depends on no optional package and runs anywhere. Plain `pip install -e .` installs
+and runs fine; a run that asks for `liger` will then stop with a message naming this
+line, rather than quietly training a different arm. See
 [`head_ce`](core/training/model_setup.py) for what the three arms are and what each
 costs.
 
@@ -75,7 +76,7 @@ default and torch.compile's inductor backend compiles C++17, so a **gcc ≥ 9**
 toolchain has to be on PATH (set `CC`/`CXX` if the system compiler is older —
 CentOS 7 ships 4.8.5, for instance). Train with `compile_trunk=false` to skip it.
 
-`torch>=2.6` is a floor, not a pin — a fresh install resolves to whatever is current,
+`torch>=2.12` is a floor, not a pin — a fresh install resolves to whatever is current,
 which need not match the version an exemplar's recorded numbers came from (this tree
 develops against 2.12.1). Expect small numeric differences from the numbers in each
 `RESULTS.md`. That is deliberate: a framework you are meant to fork should not choose
@@ -140,6 +141,70 @@ torchrun --nproc_per_node=2 --standalone \
 Code stays separate from data. Three top-level roots hold everything that isn't
 source: `datasets/` (raw corpora), `models/` (checkpoints), `outputs/` (run
 artifacts). Set `NANOINFRA_BASE_DIR` to relocate `outputs/`.
+
+## Using nanoinfra from your own repository
+
+Everything above runs inside a checkout of this repository. To build on nanoinfra
+from a repository of your own instead, depend on it as a package. It is not on PyPI:
+install it from a release tag, and pin the tag. Add it to your project's
+dependencies, or install it into your environment directly:
+
+```bash
+uv pip install "nanoinfra[liger] @ git+https://github.com/suning-git/nanoinfra.git@v0.3.0-preview"
+```
+
+`v0.3.0-preview` is the 0.3.0 preview, a pre-release (its package version is 0.3.0rc0); the
+last stable release is `v0.2.0`.
+
+The requirements under Install still apply, including a virtual environment for
+`uv pip` to install into (`uv venv`). Release tags are not moved, so a pin always
+means the same code, and the environment records the commit the tag resolved to
+(`nanoinfra-*.dist-info/direct_url.json`) if you want your runs to log it.
+
+**What the package holds.** Two import names, `core` and `modalities`, with their
+configs. The exemplars and `projects/` are not in it. To start from an exemplar, copy
+its folder from a checkout of the same tag into your repository under the same path,
+`exemplars/<name>/`, and run it from your repository root as above
+(`python -m exemplars.<name>.…`). The path matters: an exemplar imports its own
+modules by it, and finds `models/` (the world-model and motion exemplars also
+`datasets/` and the trained tokenizer) two levels above its own folder — in your
+repository root. Those two also train the text tokenizer first, on FineWeb shards
+that `exemplars/text_pretrain/data/download_shards.py` fetches, so copy
+`text_pretrain` along with them.
+
+**`core` is a common name.** Python looks in the current directory (or the running
+script's directory) before the installed packages, so a `core/` or `modalities/`
+directory there — in your repository root, say — can be imported in place of
+nanoinfra's, with no error until something it lacks is used. With a regular install
+only a package (a directory with an `__init__.py`) does this; with an editable
+install, below, any directory of that name does. Give your own top-level folders
+other names. To see which one you got: `python -c "import core; print(list(core.__path__))"`.
+
+**Where files go.**
+- `outputs/` — the trained tokenizer, the FineWeb shards, default checkpoints, the
+  motion caches — is `./outputs` relative to the directory you run from, unless
+  `NANOINFRA_BASE_DIR` points elsewhere. Run from your repository root, or set it to
+  the absolute path of your repository's `outputs/`: the world-model and motion
+  exemplars look for the tokenizer there whatever it is set to.
+- The motion modality's `datasets/` and `models/` roots default to the root of the
+  nanoinfra source tree, which in an installed copy is `site-packages/`. If you use
+  motion, set `NANOINFRA_DATASETS_DIR` and `NANOINFRA_MODELS_DIR` to your repository
+  root's `datasets/` and `models/`, where the motion exemplar downloads and saves.
+
+**Upgrading.** Before moving your pin to a new tag, read the commit message of every
+release after yours, up to and including the new one (`git show -s <tag>` in a clone): changes
+that can break code written against the previous release are listed first, marked
+*Breaking*. An exemplar you copied is your code now, so the list applies to it too.
+Then change the tag and reinstall.
+
+**Changing nanoinfra while you work on it.** Install a checkout of this repository
+over the pinned copy in editable mode, and your code imports the checkout;
+installing the tag again switches back.
+
+```bash
+uv pip install -e /path/to/nanoinfra       # your code now runs this checkout
+uv pip install "nanoinfra[liger] @ git+https://github.com/suning-git/nanoinfra.git@v0.2.0"   # back to the release
+```
 
 ## Credits
 

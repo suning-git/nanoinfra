@@ -80,8 +80,8 @@ CONFIG = {
 
 def _run(path, config=CONFIG, rank=0):
     torch.manual_seed(0)
-    system = LMSystem(_Trunk(), _Head())
-    opts = build_optimizers(system, config["optimizer"], 1)
+    system = LMSystem(_Trunk(), _Head(), prepare_trunk_inputs_fn=lambda batch: (batch["idx"], {}))
+    opts = build_optimizers(system, config["optimizer"])
     TrainerWithJsonl(system=system, optimizers=opts, dataloader=_batches(), config=config,
                      rank=rank, world_size=1, evaluators=[_Eval()], metrics_path=path).train()
 

@@ -22,99 +22,58 @@ tok/s / 30GB against replicated 106.2k tok/s / 19GB).
 2. `build_system` does NOT compile the trunk. Two mechanisms sit beside it and the
 orchestrator calls ONE of them after assembly, once it knows world_size and how it
 synchronizes gradients: `compile_system_trunk(system, ...)`
-compiles the trunk as a whole and registers the wrapper with the System;
-`compile_blocks(trunk)` compiles each block separately, in place. They are free
+compiles the trunk as a whole, `compile_blocks(trunk)` each block separately; both in
+place, so `system.trunk` stays the registered module. They are free
 functions rather than build_system flags because WHETHER to compile, and which way,
 follows from facts this function does not know — but they are mechanism, so they
 belong beside the other assembly mechanics rather than copy-pasted into every
 orchestrator.
 """
 
-import os
-
-# IMPORTANT: Configure CUDA memory allocator (matching the training baseline)
-# Note: This setting is necessary for consistency with baseline, but testing shows
-# it does NOT resolve the ~2-3% MFU difference (34% vs 37% on d20/2nodes).
-# The MFU gap likely stems from torch.compile() compilation paths or other
-# structural differences between the standalone and integrated trainers.
-# This is acceptable for test infrastructure; loss trajectories remain identical.
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import (
-    fully_shard, MixedPrecisionPolicy, FSDPModule, register_fsdp_forward_method,
+    fully_shard, FSDPModule, register_fsdp_forward_method,
 )
 from torch.distributed.device_mesh import init_device_mesh
 
 from core.model.gpt import GPT
 from core.model.heads import LMHead, LigerLMHead, LIGER_AVAILABLE
 from core.model.system import LMSystem
+from core.training import precision
+from core.utils import print0, process_identity
 
 
-def print0(*args, **kwargs):
-    """Print only from rank 0."""
-    if int(os.environ.get('RANK', 0)) == 0:
-        print(*args, **kwargs)
+def init_distributed():
+    """Make this process ready to place a model on its GPU (CUDA only), and return that device.
 
+    Whether this process is one of many, which one, and its GPU come from core.utils.process_identity (the
+    launcher's environment). Under torchrun it selects cuda:LOCAL_RANK as the current device and creates the
+    default process group (NCCL), then waits for every rank. The process group is created here, by assembly
+    (build_system calls this), and destroyed by the entry if at all (torch tears it down at exit); under torchrun a
+    second build_system in one process would create it again, which torch refuses. A plain process creates nothing
+    and selects no device: "cuda" is whatever device is current.
 
-def get_distributed_info():
-    """
-    Get distributed training info from environment variables.
-
-    Returns:
-        tuple: (is_distributed, rank, local_rank, world_size)
-    """
-    if int(os.environ.get('RANK', -1)) != -1:
-        # Distributed mode (launched via torchrun)
-        rank = int(os.environ['RANK'])
-        local_rank = int(os.environ['LOCAL_RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
-        return True, rank, local_rank, world_size
-    else:
-        # Single GPU mode
-        return False, 0, 0, 1
-
-
-def init_distributed(seed: int = 42):
-    """
-    Initialize distributed training environment (CUDA only).
-
-    Returns:
-        tuple: (is_distributed, rank, local_rank, world_size, device)
+    It sets nothing else of the process. The seed is build_system's `seed`; the float32 matmul precision and the
+    CUDA allocator's configuration are process-wide, so they are the entry's (core.utils.set_torch_global_defaults
+    sets the training entries' choice).
     """
     assert torch.cuda.is_available(), "CUDA is required for training"
-
-    # Set seeds for reproducibility (config key `seed`; was hardcoded — the LR
-    # audit could not measure seed-to-seed variance without a knob)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-
-    # Precision settings: use TF32 for matmuls
-    torch.set_float32_matmul_precision("high")
-
-    # Get distributed info
-    is_distributed, rank, local_rank, world_size = get_distributed_info()
-
-    # Setup device
-    if is_distributed:
-        device = torch.device("cuda", local_rank)
+    identity = process_identity()
+    device = identity.device
+    if identity.distributed:
         torch.cuda.set_device(device)
         dist.init_process_group(backend="nccl", device_id=device)
         dist.barrier()
-        print0(f"Distributed training: world_size={world_size}")
-    else:
-        device = torch.device("cuda")
-
-    return is_distributed, rank, local_rank, world_size, device
+        print0(f"Distributed training: world_size={identity.world_size}")
+    return device
 
 
 def compile_blocks(trunk, dynamic=None):
     """Compile each transformer block separately, in place, instead of the trunk as
     a whole. Use with replicated data parallel (why: below). build_system does not
     compile the trunk; the orchestrator calls this OR compile_system_trunk, not both
-    (only the per-block-then-whole order is detected — this function sees the trunk,
-    not the System, so it cannot tell that a whole-trunk wrapper is already registered).
+    (either order is refused).
 
     `dynamic` is forwarded to torch.compile. None (default) lets dynamo decide;
     False pins static shapes, which is worth a few percent on architectures whose
@@ -135,12 +94,15 @@ def compile_blocks(trunk, dynamic=None):
     """
     # Compile each block's FORWARD rather than replacing the block with an
     # OptimizedModule. Replacing it registers the compiled wrapper as a child and
-    # inserts `_orig_mod.` into every one of that block's state_dict keys — which is
-    # exactly what LMSystem.set_compiled_trunk goes out of its way to avoid, and what
+    # inserts `_orig_mod.` into every one of that block's state_dict keys, and
     # breaks `isinstance(block, Block)` and any consumer of a raw state_dict. Binding
     # the compiled callable as an instance attribute leaves the module registry, the
     # keys, and the types untouched. (Verified: identical keys, bitwise-identical
     # outputs, and dynamo does compile it.)
+    if trunk._compiled_call_impl is not None:
+        raise RuntimeError(
+            "compile_blocks: the trunk is already compiled as a whole "
+            "(compile_system_trunk). Pick ONE mechanism for a trunk.")
     for block in trunk.blocks:
         if getattr(block.forward, "_torchdynamo_orig_callable", None) is not None:
             raise RuntimeError(
@@ -152,36 +114,43 @@ def compile_blocks(trunk, dynamic=None):
 
 
 def compile_system_trunk(system, **compile_kwargs):
-    """Compile the trunk as a whole and register the wrapper for the System's hot
-    path (LMSystem._run_trunk). The thin counterpart of compile_blocks: after
-    build_system returns, the orchestrator calls one of the two — or neither.
+    """Compile the trunk as a whole, in place: nn.Module.compile on the registered
+    trunk. The thin counterpart of compile_blocks: after build_system returns, the
+    orchestrator calls one of the two — or neither.
+
+    In place, so `system.trunk` stays the one registered module:
+    every call of it — training (LMSystem.loss), teacher-forcing evaluation, a
+    System rebuilt around the same trunk — runs the compiled code, and its state_dict
+    keys, parameters and type are unchanged. A separate `torch.compile(trunk)` wrapper
+    is not used: under the name `trunk` it would put `_orig_mod.` into every key (and
+    torch.distributed.checkpoint resolves names through `getattr`), and kept beside the
+    registered trunk it needs a second name for callers to choose between.
 
     `compile_kwargs` go to torch.compile unchanged (dynamic=..., mode=..., ...): the
-    text exemplars use dynamic=True, nano-dsv4 dynamic=False, the bench mode=...
-
-    Only consumed by loss paths that go through `_run_trunk`. A System whose loss
-    calls `self.trunk(...)` or loops over the blocks itself (the block-diffusion
-    Systems) never sees the wrapper — those use compile_blocks, which rebinds each
-    block's own forward and so travels with the modules wherever they are reused.
+    text entry and nano-dsv4's dense GPT use dynamic=True, the bench mode=...
 
     Refuses a trunk whose blocks are already compiled per block (stacking the two
-    mechanisms would trace a compiled callable inside a compiled callable); a second
-    whole-trunk registration is refused by set_compiled_trunk itself. The reverse
-    order — this first, compile_blocks after — is NOT detected (compile_blocks only
-    sees the trunk); the rule is still one mechanism per trunk.
+    mechanisms would trace a compiled callable inside a compiled callable), and a
+    trunk already compiled as a whole; compile_blocks refuses the reverse order. To
+    run a compiled trunk eagerly for a moment (debugging), use
+    `torch.compiler.set_stance("force_eager")`.
     """
-    for block in system.trunk.blocks:
+    trunk = system.trunk
+    for block in trunk.blocks:
         if getattr(block.forward, "_torchdynamo_orig_callable", None) is not None:
             raise RuntimeError(
                 "compile_system_trunk: the blocks are already compiled per block "
                 "(compile_blocks). Pick ONE mechanism for a trunk.")
+    if trunk._compiled_call_impl is not None:
+        raise RuntimeError(
+            "compile_system_trunk: the trunk is already compiled as a whole; compile it once.")
     print0(f"trunk compile: whole, {compile_kwargs or 'torch.compile defaults'}")
-    system.set_compiled_trunk(torch.compile(system.trunk, **compile_kwargs))
+    trunk.compile(**compile_kwargs)
     return system
 
 
 def build_system(trunk_cls, config, head_softcap=15.0, seed=42,
-                 parallel="fsdp", head_ce="naive"):
+                 parallel="fsdp", head_ce="naive", prepare_trunk_inputs_fn=None, param_dtype=torch.float32):
     """
     Assemble the LMSystem (trunk + head) with FSDP. The trunk is NOT compiled here.
 
@@ -195,6 +164,10 @@ def build_system(trunk_cls, config, head_softcap=15.0, seed=42,
     wrap in LMSystem. Compiling the trunk is the caller's NEXT line, once it knows
     world_size and its gradient-sync mechanism: compile_system_trunk (whole) or
     compile_blocks (per block).
+
+    What it changes of the process: torch's default random generators (`seed`) and, under torchrun, the current
+    device and the default process group (init_distributed). Nothing else: the float32 matmul precision and the CUDA
+    allocator's configuration act on the whole process, so the entry sets them (see init_distributed).
 
     Trunk contract (see GPT for the reference implementation): __init__(config),
     init_weights(), forward(idx, ...) -> hidden [B,T,H], `blocks` (per-layer
@@ -246,11 +219,39 @@ def build_system(trunk_cls, config, head_softcap=15.0, seed=42,
                        reading, not a formula. Fastest at every depth measured, and
                        numerically the closest to naive.
                        Works under all three placements (single / ddp / fsdp).
-            `head.loss_per_token` (unreduced CE, for an objective that weights tokens
-            itself) follows the same choice, naive or compiled; the liger arm refuses
-            it — see LigerLMHead.loss_per_token.
+            `head.loss_per_token` (unreduced CE: what evaluation reads, and what an
+            objective that weights tokens itself trains on) follows the same choice; the
+            liger arm serves it only without gradient recording, i.e. in evaluation —
+            see LigerLMHead.loss_per_token.
+        param_dtype: what the parameters are STORED in, the storage third of precision (core/training/precision.py
+            sets out the three and owns the execution one). Only the parameters of the trunk and the head are
+            converted: buffers are the model's own numerics (GPT's bf16 rotary table, a router's fp32 load-balancing
+            state) and stay as init_weights made them, in either storage. Both storages start from the same values:
+            every parameter is rounded to bf16 first, then stored in param_dtype.
+            torch.float32 (default): the parameters are kept in fp32, starting from exactly the bf16 storage's
+                initial values (the same model, stored wider), so .grad and the AdamW moments are fp32 too. For
+                the reference GPT the arithmetic is unchanged: the forward runs under the caller's bf16 autocast,
+                which casts every matmul's weights to bf16, and GPT.forward casts each embedding lookup to bf16
+                the same way, so from the same weights the loss and every matrix gradient are bit for bit those of
+                bf16 storage. The one exception is the head's weight gradient under head_ce="liger": Liger sums
+                its token chunks in fp32 here and rounds the sum to bf16 once a micro-batch, but in bf16 under bf16
+                storage or FSDP (which hands it bf16 weights either way), rounding once a chunk (LigerLMHead.loss).
+                What differs is only what is stored: the weights, the gradients (the token embedding's gradient
+                sums its token's positions in its dtype; the type embedding's, a one-hot GEMM under autocast, is
+                rounded to bf16 like a matrix's) and the moments. A trunk that reads its weights outside
+                autocast's casts (.float(), an embedding it does not cast) computes differently too.
+            torch.bfloat16: the parameters are stored in bf16, so the master weights, their .grad and the AdamW
+                moments are all bf16, and an update smaller than half a bf16 step of its weight is rounded away. Use
+                it to compare with runs trained in bf16 storage (with their code version). Until 0.3.0 this cast the
+                buffers too; for GPT that changed nothing (its rotary table is bf16 already).
+            Inference loads in bf16 by default (load_system), whatever the training storage.
         head_softcap: logit softcap for the LM head
-        seed: RNG seed for init + training reproducibility (config key `seed`)
+        seed: resets torch's default random generators, the CPU's and every CUDA device's (torch.manual_seed),
+            before the trunk is built: init_weights is reproducible and every rank draws the same initial weights,
+            which parallel="ddp" relies on (it broadcasts nothing). The caller's generator state is not saved, and
+            Python's and NumPy's generators are not touched. load_system comes through here too, so loading a
+            checkpoint resets the default generators (to 42); sample with a torch.Generator of your own. Config
+            key `seed`.
         parallel: which MULTI-DEVICE strategy to use. Ignored on one device — whether
             this process is one of many is decided by the launcher (the RANK
             environment variable: `python` versus `torchrun`), not by this argument.
@@ -262,9 +263,15 @@ def build_system(trunk_cls, config, head_softcap=15.0, seed=42,
                 synchronization: that is the caller's, via core/parallel/nano_ddp.py.
                 Faster and smaller whenever the model fits, because at that point the
                 memory bottleneck is activations rather than parameters.
+        prepare_trunk_inputs_fn: how a batch becomes the trunk's arguments, batch ->
+            (idx, kwargs) — e.g. core.model.system.prepare_unpacked_AR_trunk_inputs or
+            prepare_packed_AR_trunk_inputs, or a project function. Passed to LMSystem
+            as it is; nothing here picks one from the data. With None the System raises
+            on its first loss or evaluation batch; pure inference, which never
+            translates a batch, may leave it out.
 
     Returns:
-        dict: {'system': LMSystem, 'device', 'device_type', 'rank', 'world_size'}
+        dict: {'system': LMSystem, 'device', 'rank', 'world_size'}
     """
     # Validated before anything expensive happens: a typo should not cost a process
     # group and a full model build first.
@@ -273,9 +280,14 @@ def build_system(trunk_cls, config, head_softcap=15.0, seed=42,
     if head_ce not in ("naive", "liger", "compiled"):
         raise ValueError(f"unknown head_ce={head_ce!r}; expected "
                          "'naive', 'liger' or 'compiled'")
+    if param_dtype not in (torch.bfloat16, torch.float32):
+        raise ValueError(f"param_dtype must be torch.bfloat16 or torch.float32, got {param_dtype}")
 
-    # Initialize distributed environment
-    is_distributed, rank, local_rank, world_size, device = init_distributed(seed=seed)
+    # The seed first, as it always was: torch.manual_seed resets the default generator of the CPU and of every CUDA
+    # device, so init_weights draws the same values on every rank.
+    torch.manual_seed(seed)
+    device = init_distributed()
+    identity = process_identity()
 
     # --- Trunk on meta for efficient init ---
     print0(f"Creating trunk: {trunk_cls.__name__}, "
@@ -301,20 +313,29 @@ def build_system(trunk_cls, config, head_softcap=15.0, seed=42,
     else:
         print0(f"Head: naive CE{' (loss compiled)' if head_ce == 'compiled' else ''}")
 
+    # --- Storage: the parameters only (Module.to(dtype) would cast the model's buffers as well), through bf16 so
+    # that both storages start from the same values.
+    for p in list(trunk.parameters()) + list(head.parameters()):
+        p.data = p.data.to(torch.bfloat16).to(param_dtype)
+
     # --- Placement. Exactly three modes, and the branch says so ---------------
     # Note the two are on different axes: whether this is one device or many comes
     # from the LAUNCHER (the RANK environment variable, i.e. python vs torchrun) and
     # is not something `parallel` can choose; `parallel` picks between the multi-device
     # strategies and is ignored on one device.
-    trunk = trunk.to(dtype=torch.bfloat16)
-    head = head.to(dtype=torch.bfloat16)
-
-    if not is_distributed:
+    if not identity.distributed:
         pass                       # one device: there is nothing to place
     elif parallel == "fsdp":
         print0("Wrapping trunk + head with FSDP")
-        mesh = init_device_mesh("cuda", (world_size,))
-        mp = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16)
+        mesh = init_device_mesh("cuda", (identity.world_size,))
+        # The policy is the training execution convention's (core/training/precision.py).
+        # With param_dtype=fp32 storage: the sharded parameters, their accumulated .grad and the AdamW moments stay
+        # fp32. The forward computes with bf16 weights, so each rank's gradient is bf16 (as under autocast). The
+        # Trainer reduces on every backward, and each micro-batch's reduce-scatter (in reduce_dtype) is cast back to
+        # fp32 before it is accumulated. So bf16 here is the precision of merging the ranks' partial sums; it is not
+        # shown equivalent to fp32. Revisit it if gradient sync is ever skipped during accumulation (FSDP then
+        # accumulates the unsharded gradients in reduce_dtype) or at much larger scale.
+        mp = precision.fsdp_mixed_precision()
 
         # Trunk: per-block shard groups, then the trunk root (embeddings etc.).
         # `blocks` is the trunk contract — where they live internally is the
@@ -325,7 +346,7 @@ def build_system(trunk_cls, config, head_softcap=15.0, seed=42,
         # Head: its own shard group (a separate FSDP root).
         fully_shard(head, mesh=mesh, mp_policy=mp)
 
-        # loss()/loss_per_token()/type_losses() touch head params OUTSIDE the trunk
+        # loss()/loss_per_token() touch head params OUTSIDE the trunk
         # forward, so each needs its own FSDP window. register_fsdp_forward_method
         # REQUIRES the head to already be an FSDPModule — assert loudly, because
         # otherwise it SILENTLY no-ops and multi-GPU reads sharded params (wrong
@@ -336,22 +357,16 @@ def build_system(trunk_cls, config, head_softcap=15.0, seed=42,
         )
         register_fsdp_forward_method(head, "loss")
         register_fsdp_forward_method(head, "loss_per_token")
-        register_fsdp_forward_method(head, "type_losses")
     elif parallel == "ddp":
         # Replicate. Deliberately nothing else: the replicas already agree because
         # every rank ran the same init_weights() under the same seed, so no broadcast
         # is needed, and gradient synchronization is the caller's — see
         # core/parallel/nano_ddp.py, which the orchestrator constructs and hands to
         # the Trainer. "ddp" here means only "do not shard".
-        print0(f"Replicated data parallel across {world_size} ranks "
+        print0(f"Replicated data parallel across {identity.world_size} ranks "
                f"(gradient sync is the caller's job — see core/parallel/nano_ddp.py)")
-    else:
-        # Unreachable: `parallel` was validated before the process group was created.
-        # Kept so this branch is exhaustive BY CONSTRUCTION rather than by trusting a
-        # check forty lines earlier — a new mode added above must be handled here too.
-        raise ValueError(f"unhandled parallel={parallel!r}")
 
-    system = LMSystem(trunk, head)
+    system = LMSystem(trunk, head, prepare_trunk_inputs_fn=prepare_trunk_inputs_fn)
     # Record the architecture as an assembly fact for checkpoint
     # self-description. Recorded HERE (not at save time) because fully_shard
     # rewrites the instance's class to FSDP{ClassName} — type(trunk).__name__
@@ -359,44 +374,55 @@ def build_system(trunk_cls, config, head_softcap=15.0, seed=42,
     system.arch = trunk_cls.__name__
 
     param_count = sum(p.numel() for p in system.parameters()) / 1e9
-    print0(f"Model parameters: {param_count:.2f}B")
+    print0(f"Model parameters: {param_count:.2f}B, stored in {str(param_dtype).removeprefix('torch.')}")
 
     # The trunk is NOT compiled here. Whether, and whole vs per block, is the
     # orchestrator's decision once it knows world_size and how it synchronizes
-    # gradients: compile_system_trunk / compile_blocks, after this returns (H9).
+    # gradients: compile_system_trunk / compile_blocks, after this returns.
 
     if head_ce == "compiled":
         # Bound as an INSTANCE attribute, which is also what keeps it out of
-        # state_dict (a compiled bound method is not a Module). Note this DOES reach
-        # eval: the fused evaluator calls head.loss directly. head.type_losses is the
-        # one path pinned back to the eager class method (see heads.py), so a per-type
-        # eval does not drag eval-shaped batches into dynamo.
+        # state_dict (a compiled bound method is not a Module).
         head.loss = torch.compile(head.loss)
         # The unreduced entry sees a different N on every call (block diffusion masks
         # a random number of positions per batch, each position its own Bernoulli
         # draw), so it is dynamic from the start rather than one static graph, a
-        # recompile, then dynamic.
+        # recompile, then dynamic. Evaluation reads every metric from this entry
+        # (core/evaluation/eval_loss.py), through its own no_grad graph, compiled at
+        # the first evaluation.
         head.loss_per_token = torch.compile(head.loss_per_token, dynamic=True)
 
     return {
         'system': system,
         'device': device,
-        'device_type': 'cuda',
-        'rank': rank,
-        'world_size': world_size,
+        'rank': identity.rank,
+        'world_size': identity.world_size,
     }
 
 
 def load_system(checkpoint_dir, trunk_cls=GPT, sequence_len=None,
-                head_softcap=15.0, head_ce="naive"):
+                head_softcap=15.0, head_ce="naive", prepare_trunk_inputs_fn=None, param_dtype=torch.bfloat16):
     """Assemble a runnable System straight from a self-describing checkpoint.
 
     The standard inference entry: blueprint from the artifact
     (config_from_meta reads meta.json['model_config'] into trunk_cls.Config),
     assembly through the SAME path training uses, weights via DCP (validated
     against the recorded config), eval() mode. Instantiation choices stay with
-    the caller: sequence_len (defaults to the trained value), head_ce, head_softcap.
-    The trunk comes back eager; compiling it, if wanted, is the caller's next line.
+    the caller: sequence_len (defaults to the trained value), head_ce, head_softcap, and
+    prepare_trunk_inputs_fn (how a batch becomes trunk inputs; needed for evaluation on
+    batches, not for pure inference). The trunk comes back eager; compiling it, if
+    wanted, is the caller's next line.
+
+    param_dtype is the storage the weights are loaded INTO, an instantiation choice like head_ce. It is bf16 by default
+    whatever the checkpoint was trained with, explicitly, so that the training default (build_system's) can change
+    without changing inference. A checkpoint stored in fp32 is rounded to bf16 on load (load_model_only says so). For
+    the reference GPT evaluated under bf16 autocast this changes nothing: every use of a weight already goes through
+    bf16 there (on a d12 fp32 checkpoint the 2M-token val CE and the first batch's logits are bit-identical either
+    way). That is a property of that trunk under autocast, not of loading: load_system enables no autocast itself, and
+    without it fp32 storage computes with fp32 weights — pass torch.float32 for that. torch.float32 promises the
+    storage, not an fp32 computation: under FSDP the forward gets bf16 parameters (precision.fsdp_mixed_precision),
+    GPT's rotary table is bf16 whatever the storage, and float32 matmuls follow the process's float32 matmul
+    precision (torch.set_float32_matmul_precision: "high" allows TF32), which is the caller's to set.
 
     trunk_cls is a CHECKED default: which code to load is the caller's
     decision, what the checkpoint was trained with is the artifact's recorded
@@ -432,16 +458,11 @@ def load_system(checkpoint_dir, trunk_cls=GPT, sequence_len=None,
         raise ValueError(
             f"{checkpoint_dir} has no model_config in meta.json (checkpoint predates "
             f"self-description) — construct the config yourself and use load_model_only")
-    setup = build_system(trunk_cls, config, head_ce=head_ce, head_softcap=head_softcap)
+    setup = build_system(trunk_cls, config, head_ce=head_ce, head_softcap=head_softcap,
+                         prepare_trunk_inputs_fn=prepare_trunk_inputs_fn, param_dtype=param_dtype)
     load_model_only(checkpoint_dir, setup['system'],
                     rank=setup['rank'], world_size=setup['world_size'])
     setup['system'].eval()
     setup['gpt_config'] = config
     setup['meta'] = meta
     return setup
-
-
-def setup_model_for_training(gpt_config, **kwargs):
-    """Back-compat wrapper: older callers use the GPT-implied single-config
-    signature; live callers use build_system(trunk_cls, config)."""
-    return build_system(GPT, gpt_config, **kwargs)

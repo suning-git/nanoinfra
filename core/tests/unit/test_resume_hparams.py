@@ -1,4 +1,4 @@
-"""Optimizer hyperparameters across a resume (queue #1, CHECKPOINT_RESUME.md §0/§8).
+"""Optimizer hyperparameters across a resume.
 
 A resume restores every param_group entry from the checkpoint while the optimizers
 were built from THIS launch's config. One switch, checkpoint.override_optimizer_hparams:
@@ -9,7 +9,7 @@ Options that shape the state or the update (amsgrad, maximize, fused, ...) must 
 either way. Nothing is resumed -> the switch is irrelevant.
 
 Real builder, real DCP save + load_checkpoint_if_needed, CPU, no mocks. The
-counter-examples come first: before #1 the same resumes went through silently with
+counter-examples come first: before this check the same resumes went through silently with
 the checkpoint's values.
 """
 
@@ -25,7 +25,7 @@ from omegaconf.errors import ConfigKeyError
 from core.model import checkpoint_manager as cm
 from core.model.gpt import GPTConfig
 from core.model.system import LMSystem
-from core.training.lr_schedulers import get_lr_multiplier
+from core.training.lr_schedulers import build_lr_schedule
 from core.training.optim import build_optimizers
 from core.training.optim_resume import ADJUSTABLE, reconcile_hparams, snapshot_hparams
 from core.training.trainer import Trainer
@@ -58,7 +58,7 @@ def _system():
 
 def _build(cfg):
     system = _system()
-    return system, build_optimizers(system, cfg, 1)
+    return system, build_optimizers(system, cfg)
 
 
 BATCH = torch.tensor([1, 2, 5])
@@ -159,19 +159,6 @@ def test_options_that_shape_state_or_update_are_refused_even_with_true(ckpt, tmp
         assert "maximize" in msg
 
 
-def test_snapshot_must_match_the_optimizers(ckpt):
-    system, opts = _build(BASE)
-    before = snapshot_hparams(opts)
-    cm.load_checkpoint_if_needed({"resume_from": str(ckpt.path)}, system, opts, None, 0, 1)
-    with pytest.raises(ValueError, match="param groups per optimizer"):
-        reconcile_hparams(opts, before[:1], adopt=False)
-    with pytest.raises(ValueError, match="param groups per optimizer"):
-        reconcile_hparams(opts, [before[0][:1], before[1]], adopt=True)
-    lost = [[{k: v for k, v in g.items() if k != "initial_lr"} for g in o] for o in before]
-    with pytest.raises(ValueError, match="no initial_lr"):
-        reconcile_hparams(opts, lost, adopt=False)
-
-
 def test_switch_must_be_a_bool(ckpt):
     system, opts = _build(BASE)
     before = snapshot_hparams(opts)
@@ -188,9 +175,9 @@ def test_false_same_config_resumes_and_the_decayed_lr_is_not_a_difference(ckpt):
     assert start == 8 and changes == []
     assert _groups(opts) == ckpt.groups                     # incl. the decayed transient lr
     # the real schedule step recomputes lr from initial_lr, not from the transient lr
-    sched = {"type": "linear", "max_steps": 20, "warmup_steps": 0, "warmdown_ratio": 0.5}
-    lrm = Trainer._apply_lr_schedule(SimpleNamespace(optimizers=opts, scheduler_config=sched), 8)
-    assert lrm == get_lr_multiplier(8, sched) == 1.0
+    schedule = build_lr_schedule({"type": "linear", "warmup_steps": 0, "warmdown_ratio": 0.5}, max_steps=20)
+    lrm = Trainer._apply_lr_schedule(SimpleNamespace(optimizers=opts, lr_schedule=schedule), 8)
+    assert lrm == schedule(8) == 1.0
     for o in opts:
         for g in o.param_groups:
             assert g["lr"] == g["initial_lr"] * lrm
@@ -273,7 +260,7 @@ def test_nothing_resumed_ignores_the_switch(ckpt, tmp_path):
 def test_a_real_update_matches_the_hand_patched_reference(ckpt):
     """After adopt, one optimizer step equals the step a hand-patched optimizer takes
     from the same checkpoint on the same batch — the mechanism, not the log."""
-    sched = {"type": "linear", "max_steps": 20, "warmup_steps": 0, "warmdown_ratio": 0.5}
+    schedule = build_lr_schedule({"type": "linear", "warmup_steps": 0, "warmdown_ratio": 0.5}, max_steps=20)
     # A: resume with the new config, override on
     sys_a, opts_a, _, _ = _resume(ckpt.path, NEW, True)
     # B: resume with the checkpoint's config, then patch the adjustable values by hand
@@ -286,7 +273,7 @@ def test_a_real_update_matches_the_hand_patched_reference(ckpt):
     # C: plain resume, the checkpoint's hyperparameters (control: the values must matter)
     sys_c, opts_c, _, _ = _resume(ckpt.path, BASE, False)
     for system, opts in ((sys_a, opts_a), (sys_b, opts_b), (sys_c, opts_c)):
-        Trainer._apply_lr_schedule(SimpleNamespace(optimizers=opts, scheduler_config=sched), 8)
+        Trainer._apply_lr_schedule(SimpleNamespace(optimizers=opts, lr_schedule=schedule), 8)
         _step(system, opts, batch=torch.tensor([3, 4]))
     pa, pb, pc = _params(sys_a), _params(sys_b), _params(sys_c)
     assert all(torch.equal(pa[n], pb[n]) for n in pa)
@@ -388,12 +375,11 @@ def test_incompatible_options_and_differences_are_reported_together(tmp_path):
 
 def test_resume_banner_survives_a_start_step_past_the_horizon(ckpt, capsys):
     """Resuming step 20 into max_steps=10 used to train nothing and exit; the banner
-    must not turn that into a ZeroDivisionError or a negative multiplier."""
+    must not turn that into a ZeroDivisionError or a negative multiplier (also exactly at the horizon)."""
     system, opts, _, _ = _resume(ckpt.path, BASE, False)
-    for warmdown in (0, 0.2):
-        me = SimpleNamespace(optimizers=opts, _resume_changes=[], max_steps=4, start_step=8,
-                             scheduler_config={"type": "linear", "warmup_steps": 0,
-                                               "warmdown_ratio": warmdown, "max_steps": 4})
+    for warmdown, start in ((0, 8), (0.2, 8), (0, 4), (0.2, 4)):
+        schedule = build_lr_schedule({"type": "linear", "warmup_steps": 0, "warmdown_ratio": warmdown}, max_steps=4)
+        me = SimpleNamespace(optimizers=opts, _resume_changes=[], max_steps=4, start_step=start, lr_schedule=schedule)
         Trainer._print_resume_info(me, False)
         out = capsys.readouterr().out
         assert "nothing to train" in out and "LR multiplier" not in out

@@ -11,7 +11,8 @@ motion-band ids plus the closing tag. Masking the logits to the band ENFORCES th
 grammar the row taught rather than hoping the model learned to stay inside it. The
 band is the only per-line parameter: same function, three callers.
 
-THE THREE SAMPLERS, ported from exemplars/nano_world_model/inference/sample.py:
+THE THREE SAMPLERS, first written for exemplars/nano_world_model's autoregressive objective
+(that exemplar has trained block diffusion only since 2026-10; this is now their home):
 
     plain    recompute the whole prefix every token. O(n^2). The reference.
     cached   core's KVCache: prefill once, then one-token forwards.

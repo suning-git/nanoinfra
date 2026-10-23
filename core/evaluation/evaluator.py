@@ -5,39 +5,7 @@ Each evaluator encapsulates its own data source, metrics, and eval budget.
 Trainer just iterates evaluators and merges result dicts.
 """
 
-import contextlib
-
-import torch.distributed as dist
-
-from core.evaluation.eval_loss import evaluate_loss_logits, evaluate_loss_fused
-from core.evaluation.loss_eval import evaluate_loss as evaluate_loss_compat
-
-
-def compute_eval_batches(eval_samples, dataset_size, device_batch_size):
-    """Convert eval_samples config to number of batches per rank.
-
-    Args:
-        eval_samples: -1 for minimal (1 batch), None/0 for full dataset,
-                      positive int for specific sample count
-        dataset_size: Total samples in dataset
-        device_batch_size: Batch size per device
-
-    Returns:
-        Number of batches each rank should run
-    """
-    world_size = dist.get_world_size() if dist.is_initialized() else 1
-
-    if eval_samples == -1:
-        return 1
-    elif eval_samples and eval_samples > 0:
-        eval_samples = min(eval_samples, dataset_size)
-        raw = eval_samples // (device_batch_size * world_size)
-        if raw == 0:
-            print(f"  WARNING: eval_samples={eval_samples} too small for "
-                  f"batch_size={device_batch_size} * world_size={world_size}, using 1 batch")
-        return max(1, raw)
-    else:
-        return max(1, (dataset_size // world_size) // device_batch_size)
+from core.evaluation.eval_loss import evaluate_loss
 
 
 class Evaluator:
@@ -72,58 +40,26 @@ class Evaluator:
 
 
 class LossEvaluator(Evaluator):
-    """Generic loss evaluator with switchable computation mode.
+    """Per-position CE metrics of a System on an evaluation stream: evaluate_loss (core/evaluation/eval_loss.py)
+    with a dataloader, a batch budget and the metrics.
 
-    Wraps the service layer (evaluate_loss_logits or evaluate_loss_fused)
-    with dataloader, config, and metric naming.
+        LossEvaluator(loader, eval_steps, metrics={"val/ce": mean_ce(), "val/bpb": bits_per_byte(token_bytes)})
 
     Args:
-        dataloader: Any iterable yielding {idx, targets, target_types, ...}.
-        eval_steps: Number of batches to evaluate.
-        mode: 'logits' (head forward + F.cross_entropy) or 'fused' (head.loss, memory-safe).
-        type_metrics: Optional {type_id: "metric/name"} for per-type loss reporting.
-        token_bytes: Optional tensor for BPB computation.
-        total_metric: Metric name for total loss (None = don't report).
-        bpb_metric: Metric name for BPB (None = don't report).
+        dataloader: any iterable yielding batches with `targets`, plus whatever the metrics read (`target_types`
+            for type_ce).
+        eval_steps: number of batches per evaluation, the same on every rank.
+        metrics: {metric name: fn(batch, ce) -> (numerator, denominator)}. core's are in
+            core/evaluation/metrics.py; a project writes its own the same way. The names are fixed here, at
+            construction, which is what keeps them the same on every rank.
     """
 
-    def __init__(self, dataloader, eval_steps, mode='logits', type_metrics=None,
-                 token_bytes=None, total_metric=None, bpb_metric=None):
+    def __init__(self, dataloader, eval_steps, metrics):
         self.dataloader = dataloader
         self.eval_steps = eval_steps
-        self.mode = mode
-        self.type_metrics = type_metrics
-        self.token_bytes = token_bytes
-        self.total_metric = total_metric
-        self.bpb_metric = bpb_metric
-        self._eval_fn = evaluate_loss_fused if mode == 'fused' else evaluate_loss_logits
+        self.metrics = metrics
 
     def evaluate(self, model, autocast_ctx):
-        type_ids = list(self.type_metrics) if self.type_metrics else None
-        # Real System (trunk + head) → the eval_loss service (logits/fused). A mock
-        # per-token-loss model (unit tests) has neither → the compat helper.
-        if hasattr(model, 'trunk') and hasattr(model, 'head'):
-            eval_fn = self._eval_fn
-        else:
-            eval_fn = evaluate_loss_compat
-        # Enter the Trainer's precision regime here (base-class contract). None is
-        # accepted for callers that evaluate outside any autocast, e.g. unit tests.
-        with autocast_ctx if autocast_ctx is not None else contextlib.nullcontext():
-            raw = eval_fn(
-                model, self.dataloader, self.eval_steps,
-                type_ids=type_ids, token_bytes=self.token_bytes,
-            )
-        results = {}
-        if self.total_metric and "total_loss" in raw:
-            results[self.total_metric] = raw["total_loss"]
-        if self.bpb_metric and "bpb" in raw:
-            results[self.bpb_metric] = raw["bpb"]
-        if self.type_metrics and "type_losses" in raw:
-            for tid, name in self.type_metrics.items():
-                if tid in raw["type_losses"]:
-                    results[name] = raw["type_losses"][tid]
-        return results
-
-
-# Backward compatibility alias
-SourceLossEvaluator = LossEvaluator
+        # Enter the Trainer's precision regime here (base-class contract); evaluate_loss turns gradients off.
+        with autocast_ctx:
+            return evaluate_loss(model, self.dataloader, self.eval_steps, self.metrics)

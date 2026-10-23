@@ -1,7 +1,7 @@
 """
 rot139_vqvae — a shelf tokenizer (façade).
 
-rot139 features -> 512 VQ-EMA codes (downsample 4). The report.md-era tokenizer:
+rot139 features -> 512 VQ-EMA codes (downsample 4). The tokenizer of the original research report:
 PLAIN feature-MSE VQ (NO kinematic loss — the checkpoint's log is pure feature
 MSE; kin loss was a later lever). Its AMASS text→motion generation was
 eyeball-verified (5/6 prompts good); its reconstruction is weaker than fsq2 on

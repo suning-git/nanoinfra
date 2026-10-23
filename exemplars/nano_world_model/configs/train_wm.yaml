@@ -23,13 +23,6 @@ hydra:
 # The clip. Changing this changes the row, the model's sequence length, and which
 # cache is read — build_cache.py must have been run for the same geometry.
 # ----------------------------------------------------------------------------
-# Which world model. Both train over the SAME rows, the same data and the same trunk;
-# they differ only in `loss()`. "diffusion" predicts a masked block bidirectionally
-# (cheap training, several forwards per generated frame); "ar" predicts the next token
-# causally (one forward per TOKEN to generate, which is what the KV cache and CUDA
-# graphs in inference/ make fast).
-objective: diffusion
-
 clip:
   frames: 17                    # game frames per clip -> 5 latent frames (4 predicted)
   res: 128                      # square, 128px
@@ -69,27 +62,28 @@ model:
   n_kv_head: ${model.n_head}
 
 max_steps: 200000
-compile_trunk: true               # per-block: train_wm.py calls compile_blocks after assembly
+compile_trunk: true               # per-block: train_wm.py calls compile_blocks after assembly; training needs
+                                  # it (the two-stream mask runs through flex attention, which trains compiled only)
 
 # ----------------------------------------------------------------------------
-# The masked-diffusion noise schedule. t is clipped away from 0: the MDLM 1/t
-# weight has unbounded gradient variance as t -> 0 (BD3-LM).
+# The masked-diffusion noise schedule: t ~ U[t_min, t_max] per block. t is clipped
+# away from 0: the unclipped schedule has enormous gradient variance (BD3-LM).
 # ----------------------------------------------------------------------------
 diffusion:
   t_min: 0.2
   t_max: 1.0
 
 # ----------------------------------------------------------------------------
-# Evaluation — NELBO on frozen val rows at a fixed grid of noise levels.
-# A fixed set of rows at a fixed grid of noise levels: the ruler must not move
-# between runs, or a comparison measures the ruler.
+# Evaluation — NELBO on frozen val clips at a fixed grid of noise levels.
+# Fixed clips (spread over the val split), fixed levels, fixed masks: the ruler
+# must not move between runs, or a comparison measures the ruler.
 # ----------------------------------------------------------------------------
 evaluation:
   enabled: true                 # false = build no evaluators at all. The Trainer takes
                                 #   a LIST, so an empty one IS the off switch; core has
                                 #   no evaluation flag of its own, by design.
                                 #   For throughput benchmarks and smoke runs.
-  val_rows: 500
+  val_rows: 500                 # clips; capped at what the val split holds
   t_grid: [0.3, 0.5, 0.7, 0.9]
   batch: 4
   interval_steps: 1000

@@ -1,15 +1,17 @@
 [project]
 name = "nanoinfra"
-version = "0.2.0"
+version = "0.3.0rc0"
 description = "Modality-agnostic training infrastructure for decoder-only transformers"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
-    # >=2.6: F.scaled_dot_product_attention(..., enable_gqa=) arrived in 2.5 and
-    # FSDP2 fully_shard stabilised in 2.6. Verified lower bound, not minimum
-    # viable -- 2.5 was never tested here.
-    "torch>=2.6",
+    # >=2.12: the version this tree is developed and measured on (2.12.1); every
+    # "measured on torch 2.12" in the code and docs then holds over the whole
+    # supported range. Code here needs at least 2.9 (the per-backend
+    # torch.backends.cuda.matmul.fp32_precision the Trainer records), but nothing
+    # below 2.12 is tested.
+    "torch>=2.12",
     "numpy",
     # Direct dependency, not transitive: fineweb.py, train_tokenizer.py,
     # download_shards.py and nano_world_model's encode.py all `import
@@ -53,7 +55,9 @@ build-backend = "setuptools.build_meta"
 #   liger-kernel fused cross-entropy kernel (guarded import in core/model/heads.py)
 [project.optional-dependencies]
 wandb = ["wandb>=0.21.3"]
-liger = ["liger-kernel"]
+liger = ["liger-kernel>=0.8.0"]    # LigerLMHead builds a reduction="none" instance (eval's per-token CE), which
+                                   #   0.6.2 refuses (0.7.0 added it); 0.8.0 skips the in-forward gradient when its
+                                   #   input needs none, and is the version this was validated on
 # HuggingFaceTokenizer branch only (tokenizer.py guards the import). The default
 # RustBPE path needs rustbpe + tiktoken and nothing else.
 hf-tokenizer = ["tokenizers>=0.22.0"]

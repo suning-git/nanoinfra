@@ -4,6 +4,7 @@ standalone folder (nanoinfra installed as a library, FineWeb data via
 NANOINFRA_BASE_DIR).
 
     python run.py            # trains every arm in spec.ARMS
+    python run.py param_dtype=bf16    # extra key=value overrides go to every arm (bf16: as example_results/)
     python plot.py           # -> the figure
 
 The experiment's OWN directory is put on PYTHONPATH, so `model.trunk_class` names a
@@ -83,8 +84,8 @@ def eval_schedule(max_steps, n=spec.N_EVALS, first=5):
     return [int(x) for x in s]
 
 
-def run_arm(label, trunk_class, max_steps, steps, env, cwd):
-    ov = spec.train_overrides(trunk_class, max_steps, steps)
+def run_arm(label, trunk_class, max_steps, steps, env, cwd, extra=()):
+    ov = [*spec.train_overrides(trunk_class, max_steps, steps), *extra]
     log = OUT / f"arm_{label}.log"
     print(f"[run ] {label}: d{spec.DEPTH} -> {max_steps} steps "
           f"-> {log.parent.name}/{log.name} (tail -f to watch)", flush=True)
@@ -113,9 +114,10 @@ def main():
     env, cwd = _subprocess_env()
     max_steps = int(spec.MAX_TOKENS // spec.TBS)
     steps = eval_schedule(max_steps)
-    arms = [run_arm(label, tc, max_steps, steps, env, cwd) for label, tc in spec.ARMS]
+    extra = sys.argv[1:]                 # key=value overrides for every arm, e.g. param_dtype=bf16
+    arms = [run_arm(label, tc, max_steps, steps, env, cwd, extra) for label, tc in spec.ARMS]
     (OUT / "curves.json").write_text(
-        json.dumps({"depth": spec.DEPTH, "max_steps": max_steps, "arms": arms}, indent=2))
+        json.dumps({"depth": spec.DEPTH, "max_steps": max_steps, "overrides": extra, "arms": arms}, indent=2))
     print(f"WROTE {OUT / 'curves.json'}")
 
 
