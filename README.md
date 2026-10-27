@@ -27,6 +27,9 @@ assembler and the same `Trainer`.
 | `exemplars/nano_motion/` | text → human motion: train the motion tokenizer, then a model that turns a caption into a moving skeleton. |
 | `projects/` | where your own work goes — a fork of an exemplar with one thing changed. |
 
+**Documentation.** How to use core (the data pipeline, the model, the `Trainer`, evaluation, checkpoints,
+generation) starts at [core/README.md](core/README.md), with a doc beside each part of core.
+
 **Why three.** A framework that claims to be modality-agnostic and ships one modality
 has not been tested, it has been asserted. Video and motion do not resemble text and
 do not resemble each other — different tokenizers, different data legs, different
