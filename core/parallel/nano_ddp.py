@@ -32,12 +32,15 @@ one training loop serves one GPU and many. (FSDP spells this same idea
 `set_requires_gradient_sync`; the information — which backward is the last one — is
 only available to the training loop either way.)
 
-WHY THE BRACKET IS A CONTEXT MANAGER, not two calls. What `all_reduce` writes into is
-a TRANSIENT flat buffer, not `p.grad`; until the closing half copies it back, `p.grad`
-still holds this rank's local gradient. Forgetting the close is therefore not "a
-missed sync" — it is an optimizer step on unsynchronized gradients, with no error
-anywhere. `reset()`/`finalize()` stay public for callers that need the halves apart,
-and `reset()` refuses to open a backward whose predecessor was never closed.
+WHY THE BRACKET IS A CONTEXT MANAGER, not two calls. What `all_reduce` writes into is,
+in general, a TRANSIENT flat buffer, not `p.grad`, and only the closing half copies the
+result back and joins the side stream the reduction runs on. (A group of ONE contiguous
+gradient in its own dtype is flattened as a view of that `.grad`, which is then reduced
+in place on the side stream — the single-parameter head bucket, for instance.) Either
+way, forgetting the close is not "a missed sync": it is an optimizer step on gradients
+that are local, or being overwritten, with no error anywhere. `reset()`/`finalize()`
+stay public for callers that need the halves apart, and `reset()` refuses to open a
+backward whose predecessor was never closed.
 
 WHY THE HOOKS ARE ACCEPTABLE. Firing from `register_post_accumulate_grad_hook` is
 hidden state, which core's "explicit over implicit" stance rightly dislikes: a bare
@@ -65,13 +68,20 @@ DistributedDataParallel. Read this before reaching for a feature and finding it 
   * It does not traverse the autograd graph to find unused parameters
     (`find_unused_parameters`). Bucket counters plus a canonical issue order cover the
     same ground more cheaply — see `_release()` and `strict`.
-  * There is no communication-hook API, no gradient compression, no `join()` for
-    uneven inputs (every rank must take the same number of steps), and no
-    `static_graph` optimization.
+  * There is no communication-hook API, no compression algorithm or error feedback, no
+    `join()` for uneven inputs (every rank must take the same number of steps), and no
+    `static_graph` optimization. The one choice about the wire is `reduce_dtype`, the
+    dtype each all_reduce runs in. It chooses what FSDP's
+    `MixedPrecisionPolicy.reduce_dtype` chooses, but the two paths reduce at different
+    points (FSDP every micro-step, here once on the accumulated gradient), so the same
+    setting does not give the same numbers (see the design note on it below).
   * `gradient_as_bucket_view` is not offered because it was measured and is worse
     here — see the memory note below.
-  * Verified at WORLD SIZE 2 only. Nothing here is known to be wrong at larger world
-    sizes, and nothing is known to be right either.
+  * Verified bit for bit at WORLD SIZE 2 only. In 2026-10 the code before
+    `reduce_dtype` also trained at 7, 14, 15 (8 + 7) and 21 ranks, up to three nodes (a
+    text d12 and a video world-model trunk), and so did a runtime patch that reduced in
+    bf16 the way `reduce_dtype=torch.bfloat16` does; the curves were normal. Nothing
+    there was verified bit for bit, and the per-dtype groups were not run at all.
 
 If you need any of the above, use `torch.nn.parallel.DistributedDataParallel`; it is
 a fine choice and this module is not trying to replace it in general. What this one
@@ -94,7 +104,11 @@ produced these, and a pointer into one of them would rot or ship broken.)
 
   * MEMORY COST, stated plainly: the buffers are allocated per fire and held in
     `_inflight` until `finalize()` copies them back, so from the end of backward until
-    the bracket closes there is ONE EXTRA FULL COPY of the gradients live. Whether
+    the bracket closes there is ONE EXTRA FULL COPY of the gradients live — in the wire
+    dtype, so half the bytes for fp32 gradients reduced in bf16 and twice for bf16 ones
+    reduced in fp32, and nothing for a group of one gradient reduced in its own dtype,
+    which is a view of that `.grad` (the figures below are for buffers in the gradients'
+    own dtype, the only kind there was when they were measured). Whether
     that moves the STEP's peak depends on the activation profile — on a model whose
     peak occurs mid-backward with activations resident, it does not (measured on
     1.4B/seq8192, where the peak did not move); on a small model whose peak is at
@@ -141,7 +155,29 @@ produced these, and a pointer into one of them would rot or ship broken.)
     25-51%, where it buys a lot. Mixture-of-experts breaks the rule in the other
     direction — communication follows TOTAL parameters while compute follows only the
     ACTIVE ones (measured on a 451.8M MoE: 35% of the step) — so measure, do not
-    extrapolate.
+    extrapolate. The formula was measured on two PCIe GPUs in one box; across nodes the
+    exposed time is set less by bandwidth than by how much is still in flight when the
+    synchronizing backward ends (5090 nodes on 2 x 25 GbE RoCE, 2026-10: about 30 ms a
+    step at two nodes, 60-70 ms at three), so measure there rather than use it.
+
+  * `reduce_dtype` (2026-10, 5090 nodes on 2 x 25 GbE RoCE, a text d12 at 131k tokens
+    per GPU per step, with a runtime patch doing what reduce_dtype=torch.bfloat16
+    does). With fp32 storage the gradients are fp32, so by default the wire carries
+    fp32: 516 MiB a step for d12. reduce_dtype=torch.bfloat16 copies each gradient into
+    a bf16 buffer, reduces that and copies the result back into the fp32 `.grad`:
+    accumulation across micro-steps stays fp32. Per-GPU efficiency against one GPU: one
+    node, 7 ranks, 0.940 -> 0.949; two nodes, 14 ranks, 0.908 -> 0.941; three nodes
+    0.734 -> 0.855 under the same NCCL settings. The reduced gradient differed from the
+    fp32 reduction by about 3.4e-3 relative at 14 ranks (rounding the fp32 result once
+    to bf16 gives 1.7e-3), and in a 300-step two-node run the loss moved about as much
+    as a re-run of the fp32 arm did. No long run was measured.
+    Where a bf16 reduction rounds: converting each rank's gradient, the AVG scaling, and
+    the sums. NCCL 2.29 (the version checked) does a floating-point AVG as a pre-multiply
+    by 1/N in the wire dtype, and 1/N is generally not a bf16 number when N is not a
+    power of two (1/7 becomes 0.142578125, 7 x that = 0.998). So it is not "the fp32
+    average rounded once"; how far off depends on the inputs, the world size and the
+    algorithm NCCL picks. Off by default; FSDP's path reduces in bf16 by default
+    (core/training/precision.py).
 
   * Under `torch.compile`, whether buckets can overlap at all depends on how many
     graphs the trunk compiles to. A dense trunk compiled whole becomes ONE
@@ -285,6 +321,38 @@ class NanoDDP:
         stream: CUDA stream for the collectives. Defaults to a private one; pass your
             own only if you are coordinating with other side-stream work.
         group: process group. Defaults to the world.
+        reduce_dtype: the dtype the all_reduce runs in.
+            None (default): each gradient in its own dtype. A bucket whose parameters
+                have several dtypes (a trunk keeping some parameters in fp32 and the rest
+                in bf16) is reduced as one collective per dtype, issued back to back in
+                the order the dtypes first appear in the bucket, so no gradient is
+                widened or narrowed on the wire.
+            torch.bfloat16 or torch.float32: every gradient of the bucket is copied into
+                one buffer of that dtype, converted as it is copied, reduced, and copied
+                back into `.grad` in the parameter's own dtype. A bucket already all in
+                that dtype goes the default way, bit for bit. bf16 halves the bytes of fp32
+                gradients (see the design note on it above); float32 reduces bf16
+                gradients in fp32 for twice the bytes, and they are rounded to bf16 again
+                when copied back (it cannot restore what bf16 accumulation already lost).
+            The orchestrator chooses; the Trainer records the choice in its checkpoints.
+            Read-only after construction (see below).
+
+    WHAT EVERY RANK MUST AGREE ON. Collectives pair by issue order, so every rank must
+    build the same buckets — the same parameters, in the same order, with the same dtypes
+    — and pass the same `strict` and `reduce_dtype`. The model being the same is not
+    enough when the caller builds the buckets itself. A bucket of d dtype groups issues d
+    collectives in a row when its turn comes, so the order is (bucket 0: its groups),
+    (bucket 1: its groups), ..., then strict's flag.
+
+    WHAT IS FIXED AT CONSTRUCTION. Bucket membership, and each parameter's dtype, shape
+    and device: how each bucket goes on the wire is worked out once, here. Changing any
+    of them, or the reduce dtype, means building a new NanoDDP (close() the old one).
+
+    ONE COMPUTE STREAM. A bucket is packed on the stream current when its last gradient
+    lands, and finalize() copies back and frees the buffers on the stream current when it
+    runs. So every gradient must be produced on that one stream, and finalize() must run
+    on it too: the default stream, or one non-default stream used for the whole backward
+    and finalize(). Gradients produced on several compute streams are not supported.
 
     Everything after `buckets` is keyword-only so that inserting an argument can never
     silently re-bind an existing caller's positional.
@@ -295,15 +363,22 @@ class NanoDDP:
 
     _OWNER = "_nano_ddp_owner"               # marker left on parameters we hook
 
-    def __init__(self, buckets, *, module, strict=True, stream=None, group=None):
+    def __init__(self, buckets, *, module, strict=True, stream=None, group=None, reduce_dtype=None):
+        if reduce_dtype not in (None, torch.bfloat16, torch.float32):
+            raise ValueError(f"NanoDDP: reduce_dtype must be None, torch.bfloat16 or torch.float32, "
+                             f"got {reduce_dtype!r}")
         self.buckets = [list(b) for b in buckets]
         self.strict = strict
         self.group = group
+        self._reduce_dtype = reduce_dtype
         self.comm_stream = stream or torch.cuda.Stream()
         self.sync = True
-        self._inflight = []                  # (flat buffer, bucket index) awaiting copy-back
+        self._inflight = []                  # (flat buffer, its parameters) awaiting copy-back
         self._handles = []
         self._validate(module)
+        # How each bucket goes on the wire: [(dtype, parameters, cast)], one all_reduce per entry, in this order.
+        # The same on every rank as long as the ranks agree on the buckets (see the class docstring).
+        self._wire = [self._wire_groups(bucket) for bucket in self.buckets]
         try:
             for bucket_index, bucket in enumerate(self.buckets):
                 for param in bucket:
@@ -364,16 +439,6 @@ class NanoDDP:
                     f"NanoDDP: bucket {bucket_index} is empty. An empty bucket can "
                     f"never complete, so it would stall every bucket behind it until "
                     f"finalize(). Drop it instead.")
-            dtypes = {p.dtype for p in bucket}
-            if len(dtypes) > 1:
-                # _flatten_dense_tensors does not reject mixed dtypes; it promotes to
-                # the widest one. The result is numerically fine but silently doubles
-                # the bytes on the wire for every bf16 parameter in the bucket, which
-                # is the sort of thing nobody notices for months.
-                raise ValueError(
-                    f"NanoDDP: bucket {bucket_index} mixes dtypes {sorted(map(str, dtypes))}. "
-                    f"Flattening would promote them all to the widest, silently "
-                    f"inflating this bucket's traffic. Split it by dtype.")
             for param in bucket:
                 if not param.requires_grad:
                     raise ValueError(
@@ -443,11 +508,12 @@ class NanoDDP:
         """
         if self._inflight:
             raise RuntimeError(
-                f"NanoDDP.reset(): {len(self._inflight)} reduced bucket(s) from the "
+                f"NanoDDP.reset(): {len(self._inflight)} reduced buffer(s) from the "
                 f"previous backward were never written back into .grad. Either "
                 f"finalize() was not called, or it raised and this object was reused. "
-                f"Those gradients are still the LOCAL ones, so continuing would train "
-                f"unsynchronized replicas with no error anywhere. Use "
+                f"That synchronization never completed, so the gradients are not fit for "
+                f"a step (local ones, or a reduction written in place still landing), and "
+                f"continuing would train unsynchronized replicas with no error anywhere. Use "
                 f"`with sync_gradients(ddp, ...)` so the pair cannot come apart.")
         self._arm()
         self.sync = sync
@@ -486,8 +552,9 @@ class NanoDDP:
         # issued during backward varies per rank (evening that out is exactly what the
         # drain is for), so a flag reduced before the drain would sit at a different
         # index on different ranks — reintroducing, inside the guard, the very bug the
-        # guard reports. After the drain every rank has issued the same n buckets, so
-        # this is position n everywhere.
+        # guard reports. After the drain every rank has issued every bucket's wire
+        # groups — the same sum of groups on every rank (see WHAT EVERY RANK MUST AGREE
+        # ON) — so the flag sits at that same position everywhere.
         #
         # COST, measured rather than assumed: strict=True adds one small collective
         # per step. Interleaved A/B medians, two independent measurements on this box:
@@ -516,13 +583,16 @@ class NanoDDP:
                 f"NOT synchronized, so the replicas silently diverge. Fix the model, or "
                 f"pass strict=False to zero-fill and reduce them (which "
                 f"mixture-of-experts routing needs).")
-        for flat, bucket_index in self._inflight:
-            bucket = self.buckets[bucket_index]
-            # _unflatten only reads shape and dtype, so the parameters themselves
-            # serve as the template — no need to materialize zeros for missing grads.
-            for param, reduced in zip(bucket, _unflatten(flat, bucket)):
+        for flat, params in self._inflight:
+            # _unflatten only reads the templates' shapes (the views take flat's dtype), so
+            # the parameters themselves serve as the template — no need to materialize zeros
+            # for missing grads. copy_ converts back when the wire dtype was another.
+            for param, reduced in zip(params, _unflatten(flat, params)):
                 if param.grad is None:
-                    param.grad = reduced.clone()   # `flat` is about to be released
+                    # A copy of its own, in the parameter's dtype: a plain .to(dtype) would
+                    # return a view when the dtypes match, and that gradient would then share
+                    # (and keep alive) the whole communication buffer.
+                    param.grad = reduced.to(param.dtype, copy=True)
                 else:
                     param.grad.copy_(reduced)
         self._inflight.clear()
@@ -533,6 +603,12 @@ class NanoDDP:
         # than issuing a step's worth of collectives that the other ranks never match.
         self._arm()
         self.sync = False
+
+    @property
+    def reduce_dtype(self):
+        """The dtype the all_reduce runs in, None for each gradient's own (read-only: the wire groups are worked
+        out from it at construction)."""
+        return self._reduce_dtype
 
     def missing(self):
         """[(bucket index, #parameters that received no gradient)] for every bucket
@@ -591,13 +667,34 @@ class NanoDDP:
             self._fire(self._next)
             self._next += 1
 
+    def _wire_groups(self, bucket):
+        """[(dtype, parameters, cast)] for one bucket: what each of its all_reduces carries (see reduce_dtype)."""
+        if self._reduce_dtype is not None:
+            # `cast` asks about EVERY parameter, not the first: [bf16, fp32] reduced in bf16 must still
+            # convert, or _flatten would promote the whole bucket to fp32 again.
+            return [(self._reduce_dtype, bucket, any(p.dtype != self._reduce_dtype for p in bucket))]
+        by_dtype = {}                            # insertion-ordered: the order the dtypes first appear
+        for param in bucket:
+            by_dtype.setdefault(param.dtype, []).append(param)
+        return [(dtype, params, False) for dtype, params in by_dtype.items()]
+
     def _fire(self, bucket_index):
-        """Start this bucket's all_reduce on the side stream and keep the buffer until
-        finalize() copies the result back."""
-        bucket = self.buckets[bucket_index]
-        grads = [p.grad if p.grad is not None else torch.zeros_like(p) for p in bucket]
-        flat = _flatten(grads)                   # transient: reuses freed activations
-        self.comm_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(self.comm_stream):
-            dist.all_reduce(flat, op=dist.ReduceOp.AVG, group=self.group)
-        self._inflight.append((flat, bucket_index))
+        """Start this bucket's all_reduce(s) on the side stream, one per wire group, and
+        keep each buffer until finalize() copies the result back."""
+        for dtype, params, cast in self._wire[bucket_index]:
+            if not cast:
+                grads = [p.grad if p.grad is not None else torch.zeros_like(p) for p in params]
+                flat = _flatten(grads)           # transient: reuses freed activations
+            else:
+                # Straight into the wire dtype, converted as each gradient is copied —
+                # not flattened in the gradients' own dtype first.
+                flat = torch.empty(sum(p.numel() for p in params), dtype=dtype, device=params[0].device)
+                for param, view in zip(params, _unflatten(flat, params)):
+                    if param.grad is None:
+                        view.zero_()
+                    else:
+                        view.copy_(param.grad)
+            self.comm_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.comm_stream):
+                dist.all_reduce(flat, op=dist.ReduceOp.AVG, group=self.group)
+            self._inflight.append((flat, params))

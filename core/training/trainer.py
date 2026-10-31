@@ -118,6 +118,7 @@ def detect_gpu_type() -> tuple[str, float | None]:
         # MFU computed against this is approximate. Affects the MFU metric only, not
         # training math.
         'RTX 5090': 209.5e12,
+        'RTX 5080': 112.6e12,    # consumer card, FP32-accumulate rate, as for the RTX 5090
         # Ampere and Ada (FP16/BF16 tensor peak, dense):
         'RTX A6000': 155e12,
         'A800': 312e12,          # A800-SXM4-80GB, A100 compute
@@ -521,6 +522,13 @@ class Trainer:
                     'training_precision': precision.NAME,
                     'cuda_matmul_fp32_precision': torch.backends.cuda.matmul.fp32_precision,
                 }
+                if self.ddp is not None:
+                    # The dtype NanoDDP all-reduced the gradients in (its reduce_dtype, the orchestrator's choice):
+                    # null = each gradient in its own dtype, else that dtype's name. Absent when no NanoDDP ran
+                    # (one GPU, FSDP). Recorded, not restored: a resume uses whatever the orchestrator passes then.
+                    reduce_dtype = self.ddp.reduce_dtype
+                    trainer_state['nano_ddp_reduce_dtype'] = (
+                        None if reduce_dtype is None else str(reduce_dtype).removeprefix('torch.'))
                 save_checkpoint_if_needed(
                     step, self.system, self.optimizers,
                     self.config, self.rank, self.world_size,

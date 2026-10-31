@@ -75,6 +75,9 @@ deterministic: false             # torch.use_deterministic_algorithms(True) for 
 # replicating wins — the bottleneck is activations, not parameters, so sharding
 # costs an all-gather per block and saves nothing. See train_text_1p4b.yaml.
 parallel: fsdp
+# Under ddp, the dtype the gradients are all-reduced in: null = each in its own (the storage dtype) | bf16 | fp32.
+# bf16 halves the traffic of fp32 storage; worth it across nodes (NanoDDP's reduce_dtype). Ignored otherwise.
+ddp_reduce_dtype: null
 
 # ----------------------------------------------------------------------------
 # Data — the text modality's source declaration (FineWeb streaming through

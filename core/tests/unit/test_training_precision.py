@@ -5,10 +5,13 @@ Pinned on CPU:
     autocast context of its own;
   * a checkpoint the Trainer saves records the convention's name and the float32 matmul precision setting (the
     entry's, read at the save, not assumed), whether the entry set it through torch.set_float32_matmul_precision or
-    through PyTorch's per-backend setting (under which the legacy getter raises).
+    through PyTorch's per-backend setting (under which the legacy getter raises);
+  * and, when a NanoDDP synchronized the run, the dtype it reduced the gradients in (null = each in its own); the
+    key is absent otherwise, which is not the same as null.
 """
 
 import json
+from contextlib import contextmanager
 
 import pytest
 import torch
@@ -57,7 +60,18 @@ class _Head(torch.nn.Module):
         return F.cross_entropy(self.proj(hidden).flatten(0, 1), targets.flatten())
 
 
-def _train_and_read_meta(tmp_path):
+class _StubDDP:
+    """What the Trainer asks of a NanoDDP: sync_on() around each backward, and reduce_dtype for the record."""
+
+    def __init__(self, reduce_dtype):
+        self.reduce_dtype = reduce_dtype
+
+    @contextmanager
+    def sync_on(self, enabled=True):
+        yield
+
+
+def _train_and_read_meta(tmp_path, ddp=None):
     """The real Trainer.train() on the CPU for 3 steps, saving at the end (the caller asks for cpu_cuda_stubs).
     Returns the saved trainer_state."""
     from core.training.trainer import Trainer
@@ -74,7 +88,7 @@ def _train_and_read_meta(tmp_path):
               "optimizer": OPT, "logging": {"log_every": 100}, "wandb": {"enabled": False},
               "checkpoint": {"enabled": True, "save_dir": str(tmp_path), "save_every": -1, "keep_last_n": 2}}
     Trainer(system=system, optimizers=build_optimizers(system, OPT), dataloader=batches(), config=config,
-            rank=0, world_size=1, evaluators=[]).train()
+            rank=0, world_size=1, evaluators=[], ddp=ddp).train()
     return json.loads((tmp_path / "step_000002" / "meta.json").read_text())["trainer_state"]
 
 
@@ -97,3 +111,11 @@ def test_a_trainer_checkpoint_records_how_the_run_computed(tmp_path, cpu_cuda_st
 def test_the_per_backend_setting_is_recorded_not_refused(tmp_path, cpu_cuda_stubs, matmul_precision_restored):
     torch.backends.cuda.matmul.fp32_precision = "tf32"      # PyTorch's newer API; the legacy getter raises after it
     assert _train_and_read_meta(tmp_path)["cuda_matmul_fp32_precision"] == "tf32"
+
+
+def test_the_nano_ddp_reduce_dtype_is_recorded_only_when_a_nano_ddp_ran(tmp_path, cpu_cuda_stubs,
+                                                                      matmul_precision_restored):
+    assert "nano_ddp_reduce_dtype" not in _train_and_read_meta(tmp_path / "single")
+    for reduce_dtype, recorded in [(None, None), (torch.bfloat16, "bfloat16"), (torch.float32, "float32")]:
+        state = _train_and_read_meta(tmp_path / str(recorded), ddp=_StubDDP(reduce_dtype))
+        assert "nano_ddp_reduce_dtype" in state and state["nano_ddp_reduce_dtype"] == recorded

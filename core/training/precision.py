@@ -15,8 +15,8 @@ The convention, named NAME and recorded in every checkpoint the Trainer saves (m
     each gradient is reduce-scattered in bf16, then accumulated in the storage dtype (fsdp_mixed_precision). FSDP's
     default cast_forward_inputs=True also casts the floating-point inputs of every sharded module to bf16 (a block
     that takes its rotary table as an argument receives it in bf16).
-  * under NanoDDP (parallel="ddp") no dtype is fixed: each gradient is all-reduced in the dtype it has, the
-    storage dtype.
+  * under NanoDDP (parallel="ddp") the gradient all-reduce's dtype is not part of it: it is NanoDDP's reduce_dtype,
+    which the orchestrator chooses (by default each gradient in the dtype it has, the storage dtype).
 
 Not part of it, because it is not the training step's: the float32 matmul precision
 (torch.set_float32_matmul_precision) acts on the whole process — training, evaluation, inference, any other model
@@ -24,7 +24,11 @@ in it — so the entry sets it (the training entries through core.utils.set_torc
 Trainer records the setting at each save (['trainer_state']['cuda_matmul_fp32_precision']).
 
 One convention, so nothing here is a parameter to pass around: when a second one is supported, it becomes a
-choice, and NAME tells the checkpoints of the two apart.
+choice, and NAME tells the checkpoints of the two apart. A checkpoint's full record of how the run computed is NAME
+plus the fields the Trainer writes beside it: the float32 matmul setting, and under NanoDDP its reduce dtype
+(['trainer_state']['nano_ddp_reduce_dtype']: null = each gradient in its own dtype, a name = that dtype; the key is
+absent when no NanoDDP ran, and in checkpoints saved before it was recorded). These are records only: nothing reads
+them back, and a resume runs with whatever the orchestrator passes then.
 """
 import torch
 from torch.distributed.fsdp import MixedPrecisionPolicy

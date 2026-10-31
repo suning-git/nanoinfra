@@ -215,9 +215,13 @@ def main(cfg: DictConfig) -> None:
         # order, so every rank must issue them in the same sequence. block_buckets()
         # returns completion order (last block first); the LM head completes before any
         # block, so it goes at the FRONT.
+        # The dtype the gradients cross the wire in: by default each in its own (the storage dtype); bf16 halves
+        # the bytes of fp32 storage's gradients, which pays across nodes (NanoDDP's reduce_dtype).
+        reduce_dtype = {None: None, 'bf16': torch.bfloat16, 'fp32': torch.float32}[config.get('ddp_reduce_dtype')]
         ddp = NanoDDP([[p for p in system.head.parameters() if p.requires_grad]]
-                      + block_buckets(system.trunk), module=system)
-        print0(f"  NanoDDP: {len(ddp.buckets)} buckets across {world_size} replicas")
+                      + block_buckets(system.trunk), module=system, reduce_dtype=reduce_dtype)
+        print0(f"  NanoDDP: {len(ddp.buckets)} buckets across {world_size} replicas, "
+               f"reduce_dtype={config.get('ddp_reduce_dtype')}")
 
     # --- Data: the TWO system objects (layout + resolver) ride the shared bag ---
     data_config = config['data']

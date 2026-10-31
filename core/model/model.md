@@ -247,6 +247,10 @@ embeddings N(0, 1), the two output projections of every block and the type embed
 recomputed. The head starts at zero (`LMHead.init_weights()`). Parameters stay in the dtype they were built in;
 `build_system` decides the storage.
 
+**Weight decay**: `GPT` and `LMHead` declare no exemptions (`no_weight_decay_names`, "Weight decay exemptions" in
+[../training/training.md](../training/training.md)), so every parameter is decayed: the norms have no learned
+parameters and there are no biases.
+
 **`estimate_flops()`** is 6 × (the parameters minus the token embedding) + 12 × layers × heads × head width × T, the
 attention term charged for the full sequence length (the PaLM / nanoGPT convention, which does not credit the causal
 half: 2.9 to 5.4% of the total at the sizes measured, and the same in every comparison of dense causal models).

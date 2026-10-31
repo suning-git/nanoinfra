@@ -157,6 +157,9 @@ The trunk is never compiled here (next section). The arguments:
   and `n_layer` (printed while assembling). The GPT and the System side are in
 [../model/model.md](../model/model.md).
 
+Every parameter of the trunk is weight-decayed unless one of its modules declares it exempt in
+`no_weight_decay_names` ("Weight decay exemptions", below): a gain whose neutral value is 1, a log-parametrized rate.
+
 ## Compiling the trunk
 
 `build_system` does not compile. After it, the orchestrator calls one of two functions, or neither. Both compile in
@@ -311,8 +314,8 @@ rates were tuned on a 768-wide model):
 | embedding | every `nn.Embedding` in the trunk (token and type embeddings) | `embedding_lr`, 0.2 |
 | matrix | every other trunk parameter | `lr_max`, 3e-4 |
 
-`weight_decay` (default 0.01) and `betas` (default [0.9, 0.95]) are the same for all three; eps (1e-10) and the
-fused kernel are fixed. Each group's scaled rate is stored as its `initial_lr`, which the schedule multiplies. Only
+`weight_decay` (default 0.01; a module can exempt its parameters, below) and `betas` (default [0.9, 0.95]) are the
+same for all three; eps (1e-10) and the fused kernel are fixed. Each group's scaled rate is stored as its `initial_lr`, which the schedule multiplies. Only
 `type: adamw` exists. For a two-layer, 32-wide GPT the scale is (32 / 768)^-0.5 ≈ 4.9:
 
 ```python run
@@ -345,6 +348,54 @@ optimizer 1, matrix            : 12 tensors, initial_lr 0.097980
 The groups come from module types, not from GPT's attribute names, so any trunk gets them. A project that wants
 other groups or another optimizer builds its own list: the Trainer steps every optimizer it is given, and each
 parameter group needs an `initial_lr`, which the schedule multiplies.
+
+### Weight decay exemptions
+
+Weight decay pulls a parameter toward 0. That is right only where 0 is the parameter's neutral value, and which
+value is neutral depends on how its designer wrote it: a gain applied as `g * x` has 1 (decay would shrink the
+layer), one written `(1 + w) * x` has 0 (decay is fine); Gated DeltaNet's `A_log` and `dt_bias`, which set how fast a
+head forgets, have none at 0. So core infers nothing from shapes, names or module types: every parameter is decayed
+unless the module that registers it names it in `no_weight_decay_names`, a tuple of its own parameters' local names:
+
+```python
+class GatedDeltaNet(nn.Module):
+    no_weight_decay_names = ("A_log", "dt_bias")                     # a class attribute ...
+
+self.ln_1 = nn.LayerNorm(n_embd)
+self.ln_1.no_weight_decay_names = ("weight",)                        # ... or on an instance (it replaces the class's);
+                                                                     # the bias's neutral value is 0: decayed
+```
+
+In each role the exempt parameters form a group of their own right after it, at the same learning rate and
+`weight_decay` 0; with nothing declared the groups are the three above (the GPT declares nothing). A name that is
+not one of the module's own parameters raises (a typo, or a parameter renamed without its declaration, would
+otherwise keep its decay silently). The declaration is on the module, not on the parameter object, because
+`build_system`'s initialization on the meta device, FSDP and `deepcopy` replace the parameter objects and keep the
+modules and names; it is model code: not saved in a checkpoint, and a resume does not compare it with one.
+`no_weight_decay_params(system)` lists the declared parameters, for a project that builds its own optimizers. A
+designer who keeps the token embedding undecayed, on the same two-layer GPT:
+
+```python run
+ex_trunk, ex_head = GPT(cfg), LMHead(cfg.n_embd, cfg.vocab_size)
+ex_trunk.transformer.wte.no_weight_decay_names = ("weight",)
+ex_optimizers = build_optimizers(LMSystem(ex_trunk, ex_head), {"type": "adamw", "lr_max": 0.02})
+for i, opt in enumerate(ex_optimizers):
+    for group in opt.param_groups:
+        print(f"optimizer {i}: {len(group['params']):2d} tensors, initial_lr {group['initial_lr']:.6f}, "
+              f"weight_decay {group['weight_decay']}")
+```
+```text output
+Scaling the LR for the AdamW parameters ∝1/√(32/768) = 4.898979
+Using AdamW optimizer for matrix parameters (lr=0.02, betas=(0.9, 0.95), wd=0.01)
+Weight decay exempt for 1 of the parameters, as their modules declare (no_weight_decay_names)
+optimizer 0:  1 tensors, initial_lr 0.019596, weight_decay 0.01
+optimizer 0:  1 tensors, initial_lr 0.979796, weight_decay 0.01
+optimizer 0:  1 tensors, initial_lr 0.979796, weight_decay 0.0
+optimizer 1: 12 tensors, initial_lr 0.097980, weight_decay 0.01
+```
+
+The embedding role keeps the type embedding in its group and gets a second group, the token embedding at
+`weight_decay` 0.
 
 ## Learning-rate schedules
 
@@ -395,13 +446,16 @@ Three things decide how training computes, and each has one owner:
 - **execution**, how the training step computes: [precision.py](precision.py). The forward and the loss run under
   CUDA bf16 autocast, with no gradient scaler (bf16 has fp32's exponent range). Under FSDP the parameters are
   gathered in bf16 and each gradient is reduce-scattered in bf16, then accumulated in the storage dtype; FSDP also
-  casts the floating-point inputs of every sharded module to bf16. Under NanoDDP each gradient is all-reduced in its
-  own dtype, the storage dtype;
+  casts the floating-point inputs of every sharded module to bf16. Under NanoDDP the dtype the gradients are
+  all-reduced in is NanoDDP's `reduce_dtype`, the orchestrator's choice: by default each gradient in its own dtype,
+  the storage dtype (see "Several GPUs" below);
 - **the model's own numerics**, such as GPT's bf16 rotary table or the head's fp32 logits, which neither of the other
   two touches.
 
 Every checkpoint records the execution convention (`trainer_state.training_precision`, `"bf16_autocast_v1"`) and the
-float32 matmul precision setting at the save (`trainer_state.cuda_matmul_fp32_precision`).
+float32 matmul precision setting at the save (`trainer_state.cuda_matmul_fp32_precision`); a run synchronized by
+NanoDDP also records its reduce dtype (`trainer_state.nano_ddp_reduce_dtype`: `null` for each gradient in its own
+dtype, else `"bfloat16"` or `"float32"`). They are records: a resume does not read them back.
 
 ## Resuming
 
@@ -446,6 +500,12 @@ NanoDDP issues the all-reduces:   [head]   [block 11]    [block 10]    ...    [b
 ddp = NanoDDP([[p for p in system.head.parameters() if p.requires_grad]] + block_buckets(system.trunk),
               module=system)
 ```
+
+Each gradient goes on the wire in its own dtype unless the orchestrator passes `reduce_dtype`; a bucket mixing
+dtypes (some parameters kept in fp32, the rest in bf16) is then reduced as one all-reduce per dtype.
+`reduce_dtype=torch.bfloat16` converts every gradient to bf16 for the all-reduce and back into its `.grad`
+afterwards, which halves the traffic of fp32 storage and pays across nodes; the text entry reads it from
+`ddp_reduce_dtype` (`null`, `bf16` or `fp32`).
 
 Only the K-th micro-batch's backward synchronizes; the Trainer brackets each backward with `sync_gradients(ddp,
 enabled=...)`, which does nothing when `ddp` is None. Compile per block (above). What NanoDDP deliberately does not
